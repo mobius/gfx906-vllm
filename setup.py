@@ -860,7 +860,15 @@ def get_nvcc_cuda_version() -> Version:
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
-    assert CUDA_HOME is not None, "CUDA_HOME is not set"
+    if CUDA_HOME is None:
+        raise RuntimeError(
+            "CUDA_HOME is not set. "
+            "If using ROCm, ensure VLLM_TARGET_DEVICE=rocm is set."
+        )
+    if _is_hip():
+        raise RuntimeError(
+            "get_nvcc_cuda_version() should not be called in ROCm environment."
+        )
     nvcc_output = subprocess.check_output(
         [CUDA_HOME + "/bin/nvcc", "-V"], universal_newlines=True
     )
