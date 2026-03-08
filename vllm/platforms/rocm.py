@@ -565,6 +565,11 @@ class RocmPlatform(Platform):
         dtype: torch.dtype,
         backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
+        # Import V0 version for ViT models (used by qwen3_vl.py, etc.)
+        from vllm.attention.backends.registry import (
+            AttentionBackendEnum as ViTAttentionBackendEnum,
+        )
+
         if backend is not None:
             assert backend in cls.get_supported_vit_attn_backends(), (
                 f"Backend {backend} is not supported for vit attention. "
@@ -579,7 +584,7 @@ class RocmPlatform(Platform):
 
         if rocm_aiter_ops.is_enabled() and on_gfx9():
             logger.info_once("Using AITER Flash Attention backend for ViT model.")
-            return AttentionBackendEnum.ROCM_AITER_FA
+            return ViTAttentionBackendEnum.ROCM_AITER_FA
 
         # gfx906 has limited flash-attn support, use TORCH_SDPA instead
         # Only use flash-attn for gfx942+/gfx950+, not gfx906
@@ -589,7 +594,7 @@ class RocmPlatform(Platform):
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
             logger.info_once("Using Flash Attention backend for ViT model.")
-            return AttentionBackendEnum.FLASH_ATTN
+            return ViTAttentionBackendEnum.FLASH_ATTN
 
         # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend
         if (
@@ -600,7 +605,7 @@ class RocmPlatform(Platform):
             logger.info_once(
                 "Using Flash Attention (Triton backend) for ViT model on RDNA."
             )
-            return AttentionBackendEnum.FLASH_ATTN
+            return ViTAttentionBackendEnum.FLASH_ATTN
 
         # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend
         if (
@@ -611,7 +616,7 @@ class RocmPlatform(Platform):
             logger.info_once(
                 "Using Flash Attention (Triton backend) for ViT model on RDNA."
             )
-            return AttentionBackendEnum.FLASH_ATTN
+            return ViTAttentionBackendEnum.FLASH_ATTN
 
         logger.info_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
