@@ -270,6 +270,41 @@ class SupportsMultiModal(Protocol):
 
         self._tower_model_names = children_names
 
+    @contextmanager
+    def _mark_language_model(
+        self,
+        vllm_config: VllmConfig,
+        *,
+        targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+    ):
+        """
+        Mark each child module that was assigned to this model during this context
+        as a language model component.
+
+        Language model components are automatically skipped in `--mm-encoder-only`
+        mode.
+
+        If `targets` is set, instead include descendants that are an instance
+        of `targets`, even if they aren't direct children.
+        """
+        from .utils import StageMissingLayer, collect_children, no_init_weights
+
+        mm_config = vllm_config.model_config.multimodal_config
+
+        with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
+            with (
+                no_init_weights(
+                    self,
+                    lambda mod: StageMissingLayer("language_model", mod),
+                    targets=targets,
+                )
+                if mm_config.mm_encoder_only
+                else nullcontext()
+            ):
+                yield
+
+        self._language_model_names = children_names
+
 
 @runtime_checkable
 class SupportsMultiModalPruning(Protocol):
