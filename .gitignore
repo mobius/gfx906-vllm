@@ -234,3 +234,10 @@ ep_kernels_workspace/
 # Git提交脚本和工具（非项目运行必需） 
 *.bat 
 *.sh
+
+
+# Local maintenance documentation (do not commit)
+MAINTENANCE.md
+CHANGELOG.md
+HANDOVER.md
+TESTING.md
