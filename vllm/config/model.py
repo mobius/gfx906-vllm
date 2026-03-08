@@ -1714,7 +1714,7 @@ class ModelConfig:
             )
             return self.dtype
 
-        if head_dtype not in current_platform.supported_dtypes:
+        if head_dtype not in current_platform.supported_dtypes():
             logger.warning_once(
                 "The current platform does not support [%s] head dtype, "
                 "fallback to model dtype [%s].",
@@ -2017,7 +2017,7 @@ def _resolve_auto_dtype(
 
     supported_dtypes = [
         dtype
-        for dtype in current_platform.supported_dtypes
+        for dtype in current_platform.supported_dtypes()
         if _is_valid_dtype(model_type, dtype)
     ]
 
@@ -2113,7 +2113,7 @@ def _get_head_dtype(
     elif isinstance(head_dtype, torch.dtype):
         return head_dtype
     elif head_dtype is None:
-        if torch.float32 not in current_platform.supported_dtypes:
+        if torch.float32 not in current_platform.supported_dtypes():
             return dtype
         if runner_type == "pooling":
             return torch.float32

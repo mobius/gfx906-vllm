@@ -895,7 +895,7 @@ class RocmPlatform(Platform):
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
         # 新增：首先检查supported_dtypes
-        supported = cls.supported_dtypes
+        supported = cls.supported_dtypes()
         if dtype not in supported:
             gpu_name = cls.get_device_name()
             raise ValueError(
