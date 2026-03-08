@@ -2206,7 +2206,7 @@ def _get_and_verify_max_len(
     # To simplify the verification, we convert it to dict[str, TypedDict].
     rope_parameters = getattr(hf_config, "rope_parameters", None)
     if rope_parameters and not set(rope_parameters.keys()).issubset(
-        ALLOWED_LAYER_TYPES
+        ALLOWED_ATTENTION_LAYER_TYPES
     ):
         rope_parameters = {"": rope_parameters}
 
