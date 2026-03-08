@@ -448,10 +448,6 @@ class Qwen3_5Model(Qwen3NextModel):
                     elif hasattr(param, "load_qkv_weight"):
                         # For QKV: shard_id is a string ('q', 'k', 'v')
                         # Use load_qkv_weight for QKV merged parameters
-                        from vllm.v1.worker.gpu_model_runner import (
-                            Qwen3NextForConditionalGeneration,
-                        )
-
                         # Get num_heads from config if available
                         num_heads = getattr(self.config, "num_attention_heads", None)
                         if num_heads is None:
