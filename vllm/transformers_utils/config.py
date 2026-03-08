@@ -326,7 +326,7 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         config.rope_parameters["original_max_position_embeddings"] = ompe
 
     # Handle nested rope_parameters in interleaved sliding attention models
-    if set(config.rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
+    if set(config.rope_parameters.keys()).issubset(ALLOWED_ATTENTION_LAYER_TYPES):
         for rope_parameters_layer_type in config.rope_parameters.values():
             patch_rope_parameters_dict(rope_parameters_layer_type)
     else:
