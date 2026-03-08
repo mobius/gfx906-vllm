@@ -34,18 +34,31 @@ try:
         amdsmi_topo_get_link_type,
     )
 except ImportError as e:
-    logger.warning("Failed to import from amdsmi with %r", e)
+    logger.warning(
+        "Failed to import from amdsmi with %r. "
+        "AMD GPU monitoring will be unavailable. "
+        "This is optional and won't affect core functionality.",
+        e,
+    )
 
 try:
     import vllm._C  # noqa: F401
 except ImportError as e:
-    logger.warning("Failed to import from vllm._C with %r", e)
+    raise ImportError(
+        "Failed to import vllm._C. This is a required module for vLLM. "
+        "Please ensure vLLM is properly compiled. "
+        f"Original error: {e}"
+    ) from e
 
 # import custom ops, trigger op registration
 try:
     import vllm._rocm_C  # noqa: F401
 except ImportError as e:
-    logger.warning("Failed to import from vllm._rocm_C with %r", e)
+    raise ImportError(
+        "Failed to import vllm._rocm_C. This is a required module for ROCm builds. "
+        "Please ensure vLLM is properly compiled with ROCm support. "
+        f"Original error: {e}"
+    ) from e
 
 # Models not supported by ROCm.
 _ROCM_UNSUPPORTED_MODELS: list[str] = []
