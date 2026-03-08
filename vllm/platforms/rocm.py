@@ -116,8 +116,12 @@ def _query_gcn_arch_from_amdsmi() -> str:
         # Use target_graphics_version which contains the gfx name
         # e.g., 'gfx942' for MI300X/MI325X
         target_gfx = asic_info.get("target_graphics_version", "")
-        if target_gfx:
+        # FIX: Validate amdsmi return value
+        if target_gfx and target_gfx not in ["gfx0", "", None]:
             return target_gfx
+        # If amdsmi returns invalid value, fall through to torch.cuda
+        logger.debug(f"amdsmi returned invalid arch '{target_gfx}', falling back to torch.cuda")
+    # Always raise to force torch.cuda fallback if amdsmi fails or returns invalid value
     raise RuntimeError("amdsmi did not return valid GCN arch")
 
 
@@ -136,7 +140,25 @@ def _get_gcn_arch() -> str:
             "issues if CUDA_VISIBLE_DEVICES is not set yet."
         )
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
-    return torch.cuda.get_device_properties("cuda").gcnArchName
+    arch = torch.cuda.get_device_properties("cuda").gcnArchName
+    
+    # Extract base architecture name (remove suffixes like ":sramecc+:xnack-")
+    if ':' in arch:
+        arch = arch.split(':')[0]
+        logger.info(f"Extracted base architecture from torch.cuda: {arch}")
+    
+    # Validate return value - reject invalid arch names like 'gfx0'
+    if not arch or arch == "gfx0" or not arch.startswith("gfx"):
+        # Fallback to environment variable or error
+        arch = os.environ.get("VLLM_GCN_ARCH", "")
+        if not arch or not arch.startswith("gfx"):
+            raise RuntimeError(
+                f"Invalid GCN architecture '{arch}' from torch.cuda. "
+                f"Please check your GPU driver/ROCm installation or set VLLM_GCN_ARCH environment variable."
+            )
+        logger.info("Using GCN architecture from environment variable VLLM_GCN_ARCH=%s", arch)
+    
+    return arch
 
 
 # Resolve once at module load. Uses amdsmi (no CUDA init) so Ray workers
