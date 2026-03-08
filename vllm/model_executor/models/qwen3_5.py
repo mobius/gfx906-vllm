@@ -431,6 +431,23 @@ class Qwen3_5Model(Qwen3NextModel):
                 sig = inspect.signature(weight_loader)
                 if len(sig.parameters) >= 3:
                     weight_loader(param, loaded_weight, shard_id)
+                elif (
+                    hasattr(param, "load_merged_column_weight") and shard_id is not None
+                ):
+                    # Handle merged column parallel parameters (e.g., gate_up_proj)
+                    # Calculate shard_offset and shard_size based on shard_id
+                    if isinstance(shard_id, int):
+                        # For gate_up_proj: shard_id 0 = gate, shard_id 1 = up
+                        shard_size = loaded_weight.size(param.output_dim)
+                        shard_offset = shard_id * shard_size
+                        param.load_merged_column_weight(
+                            loaded_weight,
+                            shard_offset=shard_offset,
+                            shard_size=shard_size,
+                        )
+                    else:
+                        # For QKV: shard_id is a string ('q', 'k', 'v')
+                        weight_loader(param, loaded_weight, shard_id)
                 else:
                     weight_loader(param, loaded_weight)
                 break
