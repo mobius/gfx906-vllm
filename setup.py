@@ -185,26 +185,26 @@ class cmake_build_ext(build_ext):
                 num_jobs = os.cpu_count()
 
         nvcc_threads = None
-         if _is_cuda() and CUDA_HOME is not None and not _is_hip():
-             try:
-                 nvcc_version = get_nvcc_cuda_version()
-                 if nvcc_version >= Version("11.2"):
-                     # `nvcc_threads` is either the value of the NVCC_THREADS
-                     # environment variable (if defined) or 1.
-                     # when it is set, we reduce `num_jobs` to avoid
-                     # overloading the system.
-                     nvcc_threads = envs.NVCC_THREADS
-                     if nvcc_threads is not None:
-                         nvcc_threads = int(nvcc_threads)
-                         logger.info(
-                             "Using NVCC_THREADS=%d as the number of nvcc threads.",
-                             nvcc_threads,
-                         )
-                     else:
-                         nvcc_threads = 1
-                     num_jobs = max(1, num_jobs // nvcc_threads)
-             except Exception as e:
-                 logger.warning("Failed to get NVCC version: %s", e)
+        if _is_cuda() and CUDA_HOME is not None and not _is_hip():
+            try:
+                nvcc_version = get_nvcc_cuda_version()
+                if nvcc_version >= Version("11.2"):
+                    # `nvcc_threads` is either the value of the NVCC_THREADS
+                    # environment variable (if defined) or 1.
+                    # when it is set, we reduce `num_jobs` to avoid
+                    # overloading the system.
+                    nvcc_threads = envs.NVCC_THREADS
+                    if nvcc_threads is not None:
+                        nvcc_threads = int(nvcc_threads)
+                        logger.info(
+                            "Using NVCC_THREADS=%d as the number of nvcc threads.",
+                            nvcc_threads,
+                        )
+                    else:
+                        nvcc_threads = 1
+                    num_jobs = max(1, num_jobs // nvcc_threads)
+            except Exception as e:
+                logger.warning("Failed to get NVCC version: %s", e)
 
         return num_jobs, nvcc_threads
 
