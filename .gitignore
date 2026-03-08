@@ -282,3 +282,4 @@ test_*.py
 *_test.py
 *_verify.py
 *_validation.py
+.trash/
