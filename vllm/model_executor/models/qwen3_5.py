@@ -445,13 +445,25 @@ class Qwen3_5Model(Qwen3NextModel):
                             shard_offset=shard_offset,
                             shard_size=shard_size,
                         )
-                    else:
-                        # For QKV and other parameters: use signature check
-                        sig = inspect.signature(weight_loader)
-                        if len(sig.parameters) >= 3:
-                            weight_loader(param, loaded_weight, shard_id)
+                    elif hasattr(param, "load_qkv_weight"):
+                        # For QKV parameters with string shard_id
+                        num_heads = getattr(self.config, "num_attention_heads", None)
+                        if num_heads:
+                            # Calculate shard_size and offset for QKV
+                            shard_size = loaded_weight.size(param.output_dim)
+                            qkv_shard_map = {"q": 0, "k": 1, "v": 2}
+                            shard_offset = qkv_shard_map.get(shard_id, 0) * shard_size
+                            param.load_qkv_weight(
+                                loaded_weight,
+                                shard_offset=shard_offset,
+                                shard_size=shard_size,
+                                shard_id=shard_id,
+                                num_heads=num_heads,
+                            )
                         else:
                             weight_loader(param, loaded_weight)
+                    else:
+                        weight_loader(param, loaded_weight)
                 else:
                     weight_loader(param, loaded_weight)
                 break
