@@ -45,12 +45,28 @@ logger = init_logger(__name__)
 
 MultiModalEmbeddings: TypeAlias = list[Tensor] | Tensor | tuple[Tensor, ...]
 """
-The output embeddings must be one of the following formats:
+The output embeddings must be one of the following formats: 
 
 - A list or tuple of 2D tensors, where each tensor corresponds to
     each input multimodal data item (e.g, image).
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
+
+
+def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
+    """
+    A helper function to be used in the context of
+    [vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids][]
+    to provide a better error message.
+    """
+    if is_multimodal is None:
+        raise ValueError(
+            "`embed_input_ids` now requires `is_multimodal` arg, "
+            "please update your model runner according to "
+            "https://github.com/vllm-project/vllm/pull/16229."
+        )
+
+    return is_multimodal
 
 
 @runtime_checkable
