@@ -445,24 +445,8 @@ class Qwen3_5Model(Qwen3NextModel):
                             shard_offset=shard_offset,
                             shard_size=shard_size,
                         )
-                    elif hasattr(param, "load_qkv_weight"):
-                        # For QKV: shard_id is a string ('q', 'k', 'v')
-                        # Use load_qkv_weight for QKV merged parameters
-                        # Get num_heads from config if available
-                        num_heads = getattr(self.config, "num_attention_heads", None)
-                        if num_heads is None:
-                            # Fallback to default weight_loader with signature check
-                            sig = inspect.signature(weight_loader)
-                            if len(sig.parameters) >= 3:
-                                weight_loader(param, loaded_weight, shard_id)
-                            else:
-                                weight_loader(param, loaded_weight)
-                        else:
-                            param.load_qkv_weight(
-                                loaded_weight, shard_id=shard_id, num_heads=num_heads
-                            )
                     else:
-                        # Fallback to checking weight_loader signature
+                        # For QKV and other parameters: use signature check
                         sig = inspect.signature(weight_loader)
                         if len(sig.parameters) >= 3:
                             weight_loader(param, loaded_weight, shard_id)
