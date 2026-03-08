@@ -425,7 +425,14 @@ class Qwen3_5Model(Qwen3NextModel):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                # Check if weight_loader accepts shard_id parameter
+                import inspect
+
+                sig = inspect.signature(weight_loader)
+                if len(sig.parameters) >= 3:
+                    weight_loader(param, loaded_weight, shard_id)
+                else:
+                    weight_loader(param, loaded_weight)
                 break
             else:
                 is_expert_weight = False
