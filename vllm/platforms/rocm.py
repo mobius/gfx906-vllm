@@ -619,7 +619,7 @@ class RocmPlatform(Platform):
             return ViTAttentionBackendEnum.FLASH_ATTN
 
         logger.info_once("Using Torch SDPA backend for ViT model.")
-        return AttentionBackendEnum.TORCH_SDPA
+        return ViTAttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def supported_dtypes(cls) -> list[torch.dtype]:
