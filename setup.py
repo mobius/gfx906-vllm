@@ -889,6 +889,14 @@ def get_vllm_version() -> str:
     version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
+    # Debug info for ROCm environment
+    print(f"DEBUG: VLLM_TARGET_DEVICE={VLLM_TARGET_DEVICE}")
+    print(f"DEBUG: _is_cuda()={_is_cuda()}")
+    print(f"DEBUG: _is_hip()={_is_hip()}")
+    print(f"DEBUG: _is_cpu()={_is_cpu()}")
+    print(f"DEBUG: torch.version.cuda={torch.version.cuda}")
+    print(f"DEBUG: torch.version.hip={torch.version.hip}")
+
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
@@ -917,7 +925,24 @@ def get_vllm_version() -> str:
     elif _is_xpu():
         version += f"{sep}xpu"
     else:
-        raise RuntimeError("Unknown runtime environment")
+        # Fallback for ROCm environment - auto-detect from torch
+        if torch.version.hip is not None:
+            print("WARNING: Auto-detected ROCm environment, using HIP version")
+            rocm_version = get_rocm_version() or torch.version.hip
+            if rocm_version:
+                version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
+        elif torch.version.cuda is not None:
+            print(
+                "WARNING: Auto-detected CUDA environment, but _is_cuda() returned False"
+            )
+            # Try to get CUDA version without full check
+            version += f"{sep}cuda"
+        else:
+            raise RuntimeError(
+                f"Unknown runtime environment: VLLM_TARGET_DEVICE={VLLM_TARGET_DEVICE}, "
+                f"torch.version.cuda={torch.version.cuda}, "
+                f"torch.version.hip={torch.version.hip}"
+            )
 
     return version
 
