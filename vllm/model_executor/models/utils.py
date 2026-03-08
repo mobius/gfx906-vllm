@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, overload
 
 import torch
 import torch.nn as nn
-from torch.func import functional_call
+from torch.nn.modules.module import register_module_module_registration_hook
 from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
@@ -507,6 +508,100 @@ class PPMissingLayer(torch.nn.Identity):
     def forward(self, *args, **kwargs):
         """Return the first arg from args or the first value from kwargs."""
         return args[0] if args else next(iter(kwargs.values()))
+
+
+class StageMissingLayer(nn.Module):
+    def __init__(self, stage_name: str, module: nn.Module | None = None) -> None:
+        super().__init__()
+
+        self.stage_name = stage_name
+
+        # Don't register this as a child module in order to
+        # avoid missing keys when loading weights
+        self.__dict__["module"] = module
+
+    def __getattr__(self, name: str):
+        return getattr(self.__dict__["module"], name)
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(f"{self} should not be called")
+
+    def extra_repr(self) -> str:
+        return f"stage_name={self.stage_name!r}"
+
+
+@contextmanager
+def collect_children(
+    module: nn.Module,
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
+    """
+    Within this context, collect all direct child assignments to `module`,
+    returning a list of children names that is internally updated until the
+    context is exited.
+
+    If `targets` is set, instead collect descendents of `module`
+    that are an instance of `targets`, even if they aren't direct children.
+    """
+    children_names = list[str]()
+
+    if targets is None:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                children_names.append(name)
+
+        with register_module_module_registration_hook(hook):
+            yield children_names
+    else:
+        yield children_names
+
+        for name, module_ in module.named_modules():
+            if isinstance(module_, targets):
+                children_names.append(name)
+
+
+@contextmanager
+def no_init_weights(
+    module: nn.Module,
+    placeholder: Callable[[nn.Module], nn.Module],
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
+    """
+    Within this context, prevent weight initialization from using device memory and
+    replace direct child assignments to `module` with the result of `placeholder()`.
+
+    If `targets` is set, instead prevent weight initialization and
+    replace assignments where the child is an instance of `targets`,
+    even if they aren't direct children of `module`.
+    """
+    if targets is None:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                return placeholder(submodule)
+
+            return submodule
+
+        with register_module_module_registration_hook(hook), torch.device("meta"):
+            yield
+    else:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if isinstance(module_, targets):
+                submodule.to("meta")  # Free memory
+            if isinstance(submodule, targets):
+                submodule.to("meta")  # Free memory
+                return placeholder(submodule)
+
+            return submodule
+
+        # Not all descendents are targeted, so we can't use a blanket
+        # `torch.device("meta")` context
+        with register_module_module_registration_hook(hook):
+            yield
 
 
 _CPU_OFFLOAD_BYTES = 0
