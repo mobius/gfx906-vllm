@@ -241,3 +241,16 @@ MAINTENANCE.md
 CHANGELOG.md
 HANDOVER.md
 TESTING.md
+
+# Development and process documentation (DO NOT COMMIT)
+# 检查清单和指南文档
+推送前检查清单.md
+开发注意事项.md
+文档清理说明.md
+cleanup_summary.md
+gfx906_必需功能分析.md
+
+# Check scripts (not needed)
+*_check.sh
+*_检查.sh
+PRE_PUSH_CHECK.md
