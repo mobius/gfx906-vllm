@@ -582,8 +582,9 @@ class RocmPlatform(Platform):
             return AttentionBackendEnum.ROCM_AITER_FA
 
         # gfx906 has limited flash-attn support, use TORCH_SDPA instead
+        # Only use flash-attn for gfx942+/gfx950+, not gfx906
         if (
-            on_gfx90a()  # Only use flash-attn for gfx90a+, not gfx906
+            (on_gfx942() or on_gfx950())  # gfx90a equivalent: newer gfx9 arch
             and find_spec("flash_attn") is not None
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
