@@ -991,7 +991,16 @@ class InputProcessingContext:
             typ = PretrainedConfig
 
         hf_config = self.model_config.hf_config
-        if not isinstance(hf_config, typ):
+        # Allow both vLLM's custom config classes and transformers' native classes
+        # Check by instance type or by class name for compatibility
+        is_valid_type = isinstance(hf_config, typ)
+        if not is_valid_type:
+            # For compatibility with transformers native configs, check class name
+            expected_name = typ.__name__ if hasattr(typ, "__name__") else ""
+            actual_name = type(hf_config).__name__
+            is_valid_type = expected_name and expected_name == actual_name
+
+        if not is_valid_type:
             raise TypeError(
                 "Invalid type of HuggingFace config. "
                 f"Expected type: {typ}, but "
