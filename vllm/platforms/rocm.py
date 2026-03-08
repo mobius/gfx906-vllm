@@ -20,7 +20,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.config.cache import CacheDType
 
 logger = init_logger(__name__)
 
@@ -461,7 +461,14 @@ class RocmPlatform(Platform):
     def get_valid_backends(
         cls,
         device_capability: DeviceCapability,
-        attn_selector_config: "AttentionSelectorConfig",
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        attn_type: str | None = None,
         num_heads: int | None = None,
     ) -> tuple[
         list[tuple["AttentionBackendEnum", int]],
@@ -471,15 +478,22 @@ class RocmPlatform(Platform):
         invalid_reasons = {}
 
         backend_priorities = _get_backend_priorities(
-            attn_selector_config.use_mla,
-            attn_selector_config.use_sparse,
+            use_mla,
+            use_sparse,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
                 backend_class = backend.get_class()
                 invalid_reasons_i = backend_class.validate_configuration(
                     device_capability=device_capability,
-                    **attn_selector_config._asdict(),
+                    head_size=head_size,
+                    dtype=dtype,
+                    kv_cache_dtype=kv_cache_dtype,
+                    block_size=block_size,
+                    use_mla=use_mla,
+                    has_sink=has_sink,
+                    use_sparse=use_sparse,
+                    attn_type=attn_type,
                 )
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
@@ -494,8 +508,14 @@ class RocmPlatform(Platform):
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
-        attn_selector_config: "AttentionSelectorConfig",
-        num_heads: int | None = None,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        attn_type: str | None = None,
     ) -> str:
         device_capability = cls.get_device_capability()
         assert device_capability is not None
@@ -506,7 +526,14 @@ class RocmPlatform(Platform):
                 backend_class = selected_backend.get_class()
                 invalid_reasons = backend_class.validate_configuration(
                     device_capability=device_capability,
-                    **attn_selector_config._asdict(),
+                    head_size=head_size,
+                    dtype=dtype,
+                    kv_cache_dtype=kv_cache_dtype,
+                    block_size=block_size,
+                    use_mla=use_mla,
+                    has_sink=has_sink,
+                    use_sparse=use_sparse,
+                    attn_type=attn_type,
                 )
             except ImportError:
                 invalid_reasons = ["ImportError"]
@@ -523,8 +550,14 @@ class RocmPlatform(Platform):
         # so we try finding a valid backend.
         valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
             device_capability=device_capability,
-            attn_selector_config=attn_selector_config,
-            num_heads=num_heads,
+            head_size=head_size,
+            dtype=dtype,
+            kv_cache_dtype=kv_cache_dtype,
+            block_size=block_size,
+            use_mla=use_mla,
+            has_sink=has_sink,
+            use_sparse=use_sparse,
+            attn_type=attn_type,
         )
         reasons_str = (
             "{"
@@ -534,7 +567,12 @@ class RocmPlatform(Platform):
             )
             + "}"
         )
-        config_str = attn_selector_config.__repr__()
+        config_str = (
+            f"head_size={head_size}, dtype={dtype}, "
+            f"kv_cache_dtype={kv_cache_dtype}, block_size={block_size}, "
+            f"use_mla={use_mla}, has_sink={has_sink}, "
+            f"use_sparse={use_sparse}, attn_type={attn_type}"
+        )
         logger.debug_once(
             f"Some attention backends are not valid for {cls.device_name} with "
             f"{config_str}. Reasons: {reasons_str}."
