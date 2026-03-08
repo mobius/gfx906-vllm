@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Iterable, Mapping, MutableSequence, Set
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
     ClassVar,
