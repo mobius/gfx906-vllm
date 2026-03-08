@@ -695,6 +695,67 @@ git log --follow -- vllm/v1/attention/backends/mla/rocm_aiter_mla.py
 
 ---
 
+## Phase 2: 选择性同步尝试 ✅ (2026-03-08)
+
+**分支**: `gfx906/phase2-selective-sync`
+**基于**: `gfx906/adapt-phase1-critical-fixes`
+
+### 执行内容
+
+**目标**: 基于Phase 1成功经验，继续cherry-pick upsteam修复
+
+**成果**:
+- ✅ 成功应用: Ray reinit error修复 (commit a6c8f3ea5)
+- ⚠️ 评估: 6个upstream修复，5个不适用（架构差异）
+- 📝 总结: 创建了PHASE2_SELECTIVE_SYNC_SUMMARY.md
+
+**关键修复**:
+```python
+# vllm/v1/executor/ray_utils.py:347
+# Backport from upstream commit 47826cacf
+- ray.init("auto")
++ ray.init("auto", ignore_reinit_error=True)
+```
+
+**重要发现**:
+1. v0.11.1与v0.17.0+存在显著架构差异
+2. V1 vs V0 engine路径不同
+3. 配置文件结构变化（config.py → config/）
+4. 选择性同步适用范围有限
+
+**不适用修复示例**:
+- ROCm compressed tensor修复（gfx906已使用安全检查）
+- Speculative decoding修复（V0 vs V1差异）
+- Multi-step support（文件不存在）
+- Chunked prefill修复（逻辑重构）
+
+**Git提交**:
+```
+a6c8f3ea5 fix: ignore ray reinit error for ROCm/XPU platforms
+<summary doc commit>
+```
+
+**详细文档**: `PHASE2_SELECTIVE_SYNC_SUMMARY.md`
+
+### 经验教训
+
+**成功因素**:
+- Phase 1验证了单commit移植可行性
+- 系统化评估流程有效
+- 优先选择低风险修复
+
+**局限性**:
+- 大规模版本gap (3,127 commits)
+- 架构级变更难以cherry-pick
+- 依赖关系复杂
+
+**结论**:
+- 选择性同步适用于简单、独立的修复
+- 分阶段升级可能更高效
+- 需要在两种策略间权衡
+
+---
+
 **文档维护**: 每次重要工作后更新本文档
-**最后更新**: 2026-03-08 (Phase 1完成)
+**最后更新**: 2026-03-08 (Phase 2完成)
 **状态**: Phase 1完成，待硬件验证和下一步决策
