@@ -11,7 +11,15 @@ import torch
 from pydantic import ConfigDict, SkipValidation, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
+
+try:
+    # Transformers v5
+    from transformers.configuration_utils import ALLOWED_ATTENTION_LAYER_TYPES
+except ImportError:
+    # Transformers v4
+    from transformers.configuration_utils import (
+        ALLOWED_LAYER_TYPES as ALLOWED_ATTENTION_LAYER_TYPES,
+    )
 
 import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
@@ -1951,9 +1959,11 @@ def _is_valid_dtype(model_type: str, dtype: torch.dtype):
 def _check_valid_dtype(model_type: str, dtype: torch.dtype):
     # NOTE(gfx906): ignore numerical instability
     if model_type in _FLOAT16_NOT_SUPPORTED_MODELS and dtype == torch.float16:
-        logger.warning(f"Although using float16 in model type {model_type!r} "
-                       f"may introduce potential numerical instability issues."
-                       " gfx906 only supports float16, so we continue to use.")
+        logger.warning(
+            f"Although using float16 in model type {model_type!r} "
+            f"may introduce potential numerical instability issues."
+            " gfx906 only supports float16, so we continue to use."
+        )
     return True
 
 
