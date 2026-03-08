@@ -21,6 +21,9 @@ elif current_platform.is_xpu():
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # noqa: F401
+
+        get_scheduler_metadata = None  # type: ignore
+        reshape_and_cache_flash = None  # type: ignore
     except ImportError:
         logger.warning_once(
             "flash-attn is not installed on ROCm platform. "
@@ -28,6 +31,8 @@ elif current_platform.is_rocm():
             "For better performance, consider installing flash-attn."
         )
         flash_attn_varlen_func = None  # type: ignore
+        get_scheduler_metadata = None  # type: ignore
+        reshape_and_cache_flash = None  # type: ignore
 
 
 def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
