@@ -1308,6 +1308,10 @@ def get_current_vllm_config() -> VllmConfig:
     return _current_vllm_config
 
 
+def get_current_vllm_config_or_none() -> VllmConfig | None:
+    return _current_vllm_config
+
+
 T = TypeVar("T")
 
 
