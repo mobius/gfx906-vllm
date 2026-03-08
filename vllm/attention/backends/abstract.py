@@ -140,23 +140,25 @@ class AttentionBackend(ABC):
         if block_size is None:
             return True
 
+        # Check if block_size is supported by kernel requirements first
+        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
+        if supported_kernel_block_sizes:
+            for supported_size in supported_kernel_block_sizes:
+                if isinstance(supported_size, MultipleOf):
+                    supported_size = supported_size.base
+                # With hybrid_blocks feature, the framework-level block size
+                # only needs to be a multiple of the kernel's requirement,
+                # even if the kernel requires a fixed block_size.
+                if block_size % supported_size == 0:
+                    # Kernel supports this block size, skip predefined size check
+                    return True
+
+        # If not supported by kernel, check predefined sizes
         valid_sizes = get_args(BlockSize)
         if block_size not in valid_sizes:
             return False
 
-        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
-        if not supported_kernel_block_sizes:
-            return True
-
-        for supported_size in supported_kernel_block_sizes:
-            if isinstance(supported_size, MultipleOf):
-                supported_size = supported_size.base
-            # With hybrid_blocks feature, the framework-level block size
-            # only needs to be a multiple of the kernel's requirement,
-            # even if the kernel requires a fixed block_size.
-            if block_size % supported_size == 0:
-                return True
-        return False
+        return True
 
     @classmethod
     def is_mla(cls) -> bool:
