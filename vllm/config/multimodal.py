@@ -125,6 +125,10 @@ class MultiModalConfig:
     """Optional override for the multi-modal encoder attention backend when
     using vision transformers. Accepts any value from
     `vllm.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
+    mm_encoder_only: bool = False
+    """If `True`, the language model component is skipped and only the
+    multi-modal encoder is initialized and used. This is useful for
+    extracting features from images without text generation."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
