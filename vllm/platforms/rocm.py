@@ -120,7 +120,9 @@ def _query_gcn_arch_from_amdsmi() -> str:
         if target_gfx and target_gfx not in ["gfx0", "", None]:
             return target_gfx
         # If amdsmi returns invalid value, fall through to torch.cuda
-        logger.debug(f"amdsmi returned invalid arch '{target_gfx}', falling back to torch.cuda")
+        logger.debug(
+            f"amdsmi returned invalid arch '{target_gfx}', falling back to torch.cuda"
+        )
     # Always raise to force torch.cuda fallback if amdsmi fails or returns invalid value
     raise RuntimeError("amdsmi did not return valid GCN arch")
 
@@ -141,12 +143,12 @@ def _get_gcn_arch() -> str:
         )
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
     arch = torch.cuda.get_device_properties("cuda").gcnArchName
-    
+
     # Extract base architecture name (remove suffixes like ":sramecc+:xnack-")
-    if ':' in arch:
-        arch = arch.split(':')[0]
+    if ":" in arch:
+        arch = arch.split(":")[0]
         logger.info(f"Extracted base architecture from torch.cuda: {arch}")
-    
+
     # Validate return value - reject invalid arch names like 'gfx0'
     if not arch or arch == "gfx0" or not arch.startswith("gfx"):
         # Fallback to environment variable or error
@@ -156,8 +158,10 @@ def _get_gcn_arch() -> str:
                 f"Invalid GCN architecture '{arch}' from torch.cuda. "
                 f"Please check your GPU driver/ROCm installation or set VLLM_GCN_ARCH environment variable."
             )
-        logger.info("Using GCN architecture from environment variable VLLM_GCN_ARCH=%s", arch)
-    
+        logger.info(
+            "Using GCN architecture from environment variable VLLM_GCN_ARCH=%s", arch
+        )
+
     return arch
 
 
@@ -286,7 +290,7 @@ def use_rocm_custom_paged_attention(
     if _ON_GFX9:
         # gfx906不支持bfloat16，需要特殊判断
         is_gfx906 = "gfx906" in _GCN_ARCH
-        
+
         return (
             (sliding_window == 0 or sliding_window == (-1, -1))
             and (
@@ -403,7 +407,7 @@ class RocmPlatform(Platform):
     @property
     def supported_quantization(self) -> list[str]:
         """返回支持的量化方法列表
-        
+
         gfx9系列(including gfx906)的warp size为64，
         不支持bitsandbytes(需要warp size 32)。
         """
@@ -422,11 +426,11 @@ class RocmPlatform(Platform):
             "petit_nvfp4",
             "torchao",
         ]
-        
+
         # gfx9系列不支持bitsandbytes
         if not _ON_GFX9:  # _ON_GFX9现在包含gfx906
             base_quantization.append("bitsandbytes")
-        
+
         return base_quantization
 
     @classmethod
@@ -599,10 +603,10 @@ class RocmPlatform(Platform):
         logger.info_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
 
-    @property
-    def supported_dtypes(self) -> list[torch.dtype]:
+    @classmethod
+    def supported_dtypes(cls) -> list[torch.dtype]:
         """返回该平台支持的数据类型列表
-        
+
         gfx906硬件不支持bfloat16，因此只返回float16和float32。
         其他GFX9架构(gfx90a+)支持bfloat16。
         """
@@ -782,7 +786,7 @@ class RocmPlatform(Platform):
     @classmethod
     def verify_quantization(cls, quant: str) -> None:
         super().verify_quantization(quant)
-        
+
         # gfx906不支持bitsandbytes检查
         if quant == "bitsandbytes" and "gfx906" in _GCN_ARCH:
             raise ValueError(
@@ -790,7 +794,7 @@ class RocmPlatform(Platform):
                 "due to warp size 64 limitation. "
                 "Please use alternative quantization methods such as awq or gptq."
             )
-        
+
         if quant == "awq" and not envs.VLLM_USE_TRITON_AWQ:
             logger.warning(
                 "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
@@ -899,7 +903,7 @@ class RocmPlatform(Platform):
                 f"Supported dtypes are: {supported}. "
                 f"Please use --dtype=half for float16."
             )
-        
+
         # 原有的capability检查保留
         if dtype == torch.bfloat16:  # noqa: SIM102
             if not cls.has_device_capability(80):
