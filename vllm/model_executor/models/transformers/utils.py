@@ -22,7 +22,15 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 from torch import nn
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
+
+try:
+    # Transformers v5
+    from transformers.configuration_utils import ALLOWED_ATTENTION_LAYER_TYPES
+except ImportError:
+    # Transformers v4
+    from transformers.configuration_utils import (
+        ALLOWED_LAYER_TYPES as ALLOWED_ATTENTION_LAYER_TYPES,
+    )
 
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
@@ -207,7 +215,7 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     rope_parameters: dict | None = getattr(text_config, "rope_parameters", None) or {}
     if rope_parameters:
         # Nest rope_parameters if not nested already to simplify logic
-        if not set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
+        if not set(rope_parameters.keys()).issubset(ALLOWED_ATTENTION_LAYER_TYPES):
             rope_parameters = {"": rope_parameters}
         return all(rp["rope_type"] != "dynamic" for rp in rope_parameters.values())
     return True
