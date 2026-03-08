@@ -123,7 +123,7 @@ class AttentionBackend(ABC):
 
     @classmethod
     def supports_dtype(cls, dtype: torch.dtype) -> bool:
-        return dtype in cls.supported_dtypes()
+        return dtype in cls.supported_dtypes
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType | None") -> bool:
