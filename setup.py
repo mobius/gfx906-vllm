@@ -185,26 +185,26 @@ class cmake_build_ext(build_ext):
                 num_jobs = os.cpu_count()
 
         nvcc_threads = None
-        if _is_cuda() and CUDA_HOME is not None:
-            try:
-                nvcc_version = get_nvcc_cuda_version()
-                if nvcc_version >= Version("11.2"):
-                    # `nvcc_threads` is either the value of the NVCC_THREADS
-                    # environment variable (if defined) or 1.
-                    # when it is set, we reduce `num_jobs` to avoid
-                    # overloading the system.
-                    nvcc_threads = envs.NVCC_THREADS
-                    if nvcc_threads is not None:
-                        nvcc_threads = int(nvcc_threads)
-                        logger.info(
-                            "Using NVCC_THREADS=%d as the number of nvcc threads.",
-                            nvcc_threads,
-                        )
-                    else:
-                        nvcc_threads = 1
-                    num_jobs = max(1, num_jobs // nvcc_threads)
-            except Exception as e:
-                logger.warning("Failed to get NVCC version: %s", e)
+         if _is_cuda() and CUDA_HOME is not None and not _is_hip():
+             try:
+                 nvcc_version = get_nvcc_cuda_version()
+                 if nvcc_version >= Version("11.2"):
+                     # `nvcc_threads` is either the value of the NVCC_THREADS
+                     # environment variable (if defined) or 1.
+                     # when it is set, we reduce `num_jobs` to avoid
+                     # overloading the system.
+                     nvcc_threads = envs.NVCC_THREADS
+                     if nvcc_threads is not None:
+                         nvcc_threads = int(nvcc_threads)
+                         logger.info(
+                             "Using NVCC_THREADS=%d as the number of nvcc threads.",
+                             nvcc_threads,
+                         )
+                     else:
+                         nvcc_threads = 1
+                     num_jobs = max(1, num_jobs // nvcc_threads)
+             except Exception as e:
+                 logger.warning("Failed to get NVCC version: %s", e)
 
         return num_jobs, nvcc_threads
 
@@ -884,7 +884,8 @@ def get_vllm_version() -> str:
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
-    elif _is_cuda():
+    elif _is_cuda() and not _is_hip():
+        # Only check CUDA version if this is purely CUDA, not HIP/ROCm
         if envs.VLLM_USE_PRECOMPILED and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX:
             version += f"{sep}precompiled"
         else:
@@ -895,6 +896,7 @@ def get_vllm_version() -> str:
                 if "sdist" not in sys.argv:
                     version += f"{sep}cu{cuda_version_str}"
     elif _is_hip():
+        # ROCm/HIP environment - skip CUDA version checks
         # Get the Rocm Version
         rocm_version = get_rocm_version() or torch.version.hip
         if rocm_version and rocm_version != envs.VLLM_MAIN_CUDA_VERSION:
@@ -969,7 +971,7 @@ if _is_cuda() or _is_hip():
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
-if _is_cuda():
+if _is_cuda() and not _is_hip():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
     if envs.VLLM_USE_PRECOMPILED or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
