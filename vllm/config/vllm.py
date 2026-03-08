@@ -28,6 +28,7 @@ from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
 from .cache import CacheConfig
+from .attention import AttentionConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .ec_transfer import ECTransferConfig
@@ -48,6 +49,8 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
+
+    from .attention import AttentionConfig
 else:
     PretrainedConfig = Any
 
@@ -176,6 +179,8 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
+    attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
+    """Attention configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
