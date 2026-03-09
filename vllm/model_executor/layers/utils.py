@@ -268,26 +268,28 @@ def rocm_unquantized_gemm_impl(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    use_skinny = x.dtype in [torch.float16, torch.bfloat16] and bias is None
-    if use_skinny is not True:
-        return torch.nn.functional.linear(x, weight, bias)
-
     x_view = x.reshape(-1, x.size(-1))
     n = x_view.shape[0]
     m = weight.shape[0]
     k = weight.shape[1]
 
-    # prefer skinny GEMV kernel
-    if m % 4 == 0 and n == 1 and k <= 8192 and k % 8 == 0:
+    # For FP16/BF16 without bias and k % 8 == 0, prefer skinny GEMV kernel
+    if (
+        x.dtype in [torch.float16, torch.bfloat16]
+        and bias is None
+        and m % 4 == 0
+        and n == 1
+        and k <= 8192
+        and k % 8 == 0
+    ):
         out = ops.LLMM1(weight, x_view, 4)
         return out.view(*x.shape[:-1], weight.shape[0])
 
-    # low batch size, use triton matmul
-    if n <= 16:
-        return triton_matmul(x, weight)
-
-    # otherwise, use native torch
-    return torch.nn.functional.linear(x, weight, bias)
+    # For all other cases, use triton matmul to avoid hipBLAS errors
+    out = triton_matmul(x, weight)
+    if bias is not None:
+        out = out + bias
+    return out
 
     x_view = x.reshape(-1, x.size(-1))
     n = x_view.shape[0]
