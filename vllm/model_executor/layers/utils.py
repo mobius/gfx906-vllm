@@ -264,16 +264,12 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 
 
 def rocm_unquantized_gemm_impl(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    # For gfx9 (including gfx906), use optimized skinny GEMM
-    use_skinny = (
-        on_gfx9()
-        and x.dtype in [torch.float16, torch.bfloat16]
-        and weight.shape[1] % 8 == 0
-    )
-
-    if not use_skinny:
+    use_skinny = x.dtype in [torch.float16, torch.bfloat16] and bias is None
+    if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
 
     x_view = x.reshape(-1, x.size(-1))
@@ -281,18 +277,12 @@ def rocm_unquantized_gemm_impl(
     m = weight.shape[0]
     k = weight.shape[1]
 
-    # For gfx9: use wvSplitK for small batch sizes (0 < n <= 4)
-    if m > 8 and 0 < n <= 4:
-        cu_count = get_cu_count()
-        out = ops.wvSplitK(weight, x_view, cu_count, bias)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
-
-    # For gfx9: prefer skinny GEMV kernel for n == 1
-    if m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+    # prefer skinny GEMV kernel
+    if m % 4 == 0 and n == 1 and k <= 8192 and k % 8 == 0:
         out = ops.LLMM1(weight, x_view, 4)
         return out.view(*x.shape[:-1], weight.shape[0])
 
-    # For gfx9: use triton matmul for low batch sizes
+    # low batch size, use triton matmul
     if n <= 16:
         return triton_matmul(x, weight)
 
