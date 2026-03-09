@@ -13,6 +13,7 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.rocm import on_gfx9
 from vllm.utils.platform_utils import get_cu_count
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -42,39 +43,49 @@ def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
 
 def get_autotune_config():
     return [
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1}, num_stages=3, num_warps=2),
+        triton.Config(
+            {"BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 1},
+            num_stages=3,
+            num_warps=2,
+        ),
     ]
 
+
 def get_heuristics():
-    return {
-        'BLOCK_SIZE_M': lambda args: min(16, triton.next_power_of_2(args['M']))
-    }
+    return {"BLOCK_SIZE_M": lambda args: min(16, triton.next_power_of_2(args["M"]))}
+
 
 # `triton.jit`'ed functions can be auto-tuned by using the `triton.autotune` decorator, which consumes:
 #   - A list of `triton.Config` objects that define different configurations of
 #       meta-parameters (e.g., `BLOCK_SIZE_M`) and compilation options (e.g., `num_warps`) to try
 #   - An auto-tuning *key* whose change in values will trigger evaluation of all the
 #       provided configs
-@triton.autotune(
-    configs=get_autotune_config(),
-    key=['M', 'N', 'K']
-)
+@triton.autotune(configs=get_autotune_config(), key=["M", "N", "K"])
 @triton.heuristics(values=get_heuristics())
 @triton.jit
 def triton_matmul_kernel(
-        # Pointers to matrices
-        a_ptr, b_ptr, c_ptr,
-        # Matrix dimensions
-        M, N, K,
-        # The stride variables represent how much to increase the ptr by when moving by 1
-        # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
-        # by to get the element one row down (A has M rows).
-        stride_am, stride_ak,  #
-        stride_bk, stride_bn,  #
-        stride_cm, stride_cn,
-        # Meta-parameters
-        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,  #
-        GROUP_SIZE_M: tl.constexpr  #
+    # Pointers to matrices
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    # Matrix dimensions
+    M,
+    N,
+    K,
+    # The stride variables represent how much to increase the ptr by when moving by 1
+    # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
+    # by to get the element one row down (A has M rows).
+    stride_am,
+    stride_ak,  #
+    stride_bk,
+    stride_bn,  #
+    stride_cm,
+    stride_cn,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,  #
+    GROUP_SIZE_M: tl.constexpr,  #
 ):
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
@@ -132,24 +143,37 @@ def triton_matmul_kernel(
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
 
+
 def triton_matmul(a, b):
     # Check constraints.
-    assert a.shape[1] == b.shape[1], "Incompatible dimensions" # NOTE(gfx906): b.shape inv
+    assert a.shape[1] == b.shape[1], (
+        "Incompatible dimensions"
+    )  # NOTE(gfx906): b.shape inv
     assert a.is_contiguous(), "Matrix A must be contiguous"
     M, K = a.shape
-    N, K = b.shape # NOTE(gfx906): b.shape inv
+    N, K = b.shape  # NOTE(gfx906): b.shape inv
     # Allocates output.
     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
     # 1D launch kernel where each block gets its own program.
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
+    grid = lambda META: (
+        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+    )
     triton_matmul_kernel[grid](
-        a, b, c,  #
-        M, N, K,  #
-        a.stride(0), a.stride(1),  #
-        b.stride(1), b.stride(0),  # NOTE(gfx906): b.stride inv
-        c.stride(0), c.stride(1),  #
+        a,
+        b,
+        c,  #
+        M,
+        N,
+        K,  #
+        a.stride(0),
+        a.stride(1),  #
+        b.stride(1),
+        b.stride(0),  # NOTE(gfx906): b.stride inv
+        c.stride(0),
+        c.stride(1),  #
     )
     return c
+
 
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
@@ -240,13 +264,40 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 
 
 def rocm_unquantized_gemm_impl(
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        bias: torch.Tensor | None = None) -> torch.Tensor:
-    use_skinny = (x.dtype in [torch.float16, torch.bfloat16] \
-                  and bias is None)
-    if use_skinny is not True:
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    # For gfx9 (including gfx906), use optimized skinny GEMM
+    use_skinny = (
+        on_gfx9()
+        and x.dtype in [torch.float16, torch.bfloat16]
+        and weight.shape[1] % 8 == 0
+    )
+
+    if not use_skinny:
         return torch.nn.functional.linear(x, weight, bias)
+
+    x_view = x.reshape(-1, x.size(-1))
+    n = x_view.shape[0]
+    m = weight.shape[0]
+    k = weight.shape[1]
+
+    # For gfx9: use wvSplitK for small batch sizes (0 < n <= 4)
+    if m > 8 and 0 < n <= 4:
+        cu_count = get_cu_count()
+        out = ops.wvSplitK(weight, x_view, cu_count, bias)
+        return out.reshape(*x.shape[:-1], weight.shape[0])
+
+    # For gfx9: prefer skinny GEMV kernel for n == 1
+    if m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+        out = ops.LLMM1(weight, x_view, 4)
+        return out.view(*x.shape[:-1], weight.shape[0])
+
+    # For gfx9: use triton matmul for low batch sizes
+    if n <= 16:
+        return triton_matmul(x, weight)
+
+    # otherwise, use native torch
+    return torch.nn.functional.linear(x, weight, bias)
 
     x_view = x.reshape(-1, x.size(-1))
     n = x_view.shape[0]
