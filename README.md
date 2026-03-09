@@ -4,7 +4,17 @@
 [![ROCm](https://img.shields.io/badge/ROCm-6.3+-purple)](https://rocm.docs.amd.com/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue)](https://github.com/vllm-project/vllm/blob/main/LICENSE)
 
-**专为 AMD gfx906 GPU（Radeon VII、Radeon Pro VII、Instinct MI50/MI60）优化的 vLLM 分支**
+**专为 AMD gfx906 GPU（Radeon VII、Radeon Pro VII、Instinct MI50/MI60）优化的 LLM 推理引擎**
+
+## 版权声明
+
+本项目基于 [vLLM](https://github.com/vllm-project/vllm) 开发，感谢原项目所有贡献者。
+
+- **原始项目**: [vLLM](https://github.com/vllm-project/vllm) by UC Berkeley Sky Computing Lab
+- **许可证**: Apache License 2.0
+- **本项目**: 包含针对AMD gfx906 GPU的优化和修复
+
+详见 [NOTICE](NOTICE) 文件了解完整的归属声明。
 
 ## 项目状态
 
