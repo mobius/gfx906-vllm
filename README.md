@@ -58,7 +58,7 @@
 sudo apt install python3-venv python3-dev
 
 # 克隆仓库
-git clone https://github.com/ttdxq/vllm-gfx906.git
+git clone https://github.com/ttdxq/gfx906-vllm.git
 cd vllm-gfx906
 
 # 创建虚拟环境
@@ -220,8 +220,8 @@ Apache License 2.0 - 详见 [LICENSE](LICENSE)
 
 ## 联系方式
 
-- **问题反馈**: [GitHub Issues](https://github.com/ttdxq/vllm-gfx906/issues)
-- **讨论交流**: [GitHub Discussions](https://github.com/ttdxq/vllm-gfx906/discussions)
+- **问题反馈**: [GitHub Issues](https://github.com/ttdxq/gfx906-vllm/issues)
+- **讨论交流**: [GitHub Discussions](https://github.com/ttdxq/gfx906-vllm/discussions)
 
 ---
 
