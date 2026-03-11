@@ -40,7 +40,6 @@
 **已测试并确认可用：**
 - ✅ Qwen/Qwen3.5-0.8B（非多模态）
 - ✅ Qwen/Qwen3.5-2B（非多模态）
-- ✅ Qwen 系列模型（需使用 `--limit-mm-per-prompt '{"image": 0, "video": 0}'` 参数）
 
 **已知无法运行：**
 - ❌ **Qwen/Qwen3.5-35B-A3B-GPTQ-Int4** - MoE + GPTQ Int4 量化组合存在兼容性问题，导致服务无法正常启动或推理失败
