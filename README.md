@@ -28,12 +28,31 @@
 - **更新至最新的 vLLM V1 引擎** - 性能提升和新功能支持
 - **测试 Qwen3.5-0.8B** - 成功运行 Qwen/Qwen3.5-0.8B（非多模态版本）
 - **通用 Triton GEMM** - 使用 Triton 矩阵乘法替代 hipBLAS 回退，提高稳定性
+- **MoE + GPTQ 修复尝试** - 尝试修复 Qwen/Qwen3.5-35B-A3B-GPTQ-Int4，但该模型仍无法正常运行
+- **新增失败样例确认** - 实测 `cyankiwi/Qwen3.5-35B-A3B-AWQ-4bit` 在 ROCm 6.4 + gfx906 上仍无法稳定推理，可能表现为整串 `!` 输出或 `EngineCore` 崩溃
 
 ### 支持的模型
 
-当前已测试并可用：
+**⚠️ 重要提示：模型支持状态**
+
+本项目已从上游 vLLM 同步了大量新模型文件（49+ 个模型），但这些模型**未经 ROCm/gfx906 架构的适配和测试**。虽然文件已包含在代码库中，但不保证在 AMD gfx906 GPU 上能正常运行。
+
+**已测试并确认可用：**
 - ✅ Qwen/Qwen3.5-0.8B（非多模态）
 - ✅ Qwen 系列模型（需使用 `--limit-mm-per-prompt '{"image": 0, "video": 0}'` 参数）
+
+**已知无法运行：**
+- ❌ **Qwen/Qwen3.5-35B-A3B-GPTQ-Int4** - MoE + GPTQ Int4 量化组合存在兼容性问题，导致服务无法正常启动或推理失败
+- ❌ **cyankiwi/Qwen3.5-35B-A3B-AWQ-4bit** - 在 ROCm 6.4 + gfx906 上实测仍无法正常运行，现象包括返回整串 `!` 或在引擎初始化/推理阶段崩溃
+
+**未经测试的模型（同步自上游，可能不工作）：**
+- 🔄 其他 MoE 模型（exaone_moe, glm4_moe_lite 等）
+- 🔄 视觉模型（colqwen3, molmo2 等）
+- 🔄 音频模型（whisper, funasr 等）
+- 🔄 嵌入模型（colbert, voyage 等）
+- 🔄 其他新模型
+
+如需使用这些模型，建议先测试基本功能。遇到问题请提交 issue。
 
 ## 项目简介
 
@@ -166,6 +185,10 @@ print(response.choices[0].message.content)
 2. **首次推理较慢** - Triton 内核首次运行时需要编译
 3. **内存占用较大** - KV cache 预分配会占用大量 GPU 内存
 4. **实验性质** - 使用风险自负
+5. **MoE + GPTQ 量化兼容性** - Qwen/Qwen3.5-35B-A3B-GPTQ-Int4 等大型 MoE + GPTQ Int4 量化模型存在已知问题：
+   - Triton kernel 在处理特定分块大小时会出现内存访问错误
+   - aiter 后端在复杂 MoE 路由场景下不稳定
+   - 建议使用非量化 MoE 模型或较小的 MoE + GPTQ 模型
 
 ## 性能优化建议
 
