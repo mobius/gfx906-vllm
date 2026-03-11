@@ -41,6 +41,7 @@
 - ✅ Qwen/Qwen3.5-0.8B（非多模态）
 - ✅ Qwen/Qwen3.5-2B（非多模态）
 - ✅ Qwen/Qwen3.5-4B（非多模态）
+- ✅ Qwen/Qwen3.5-9B（非多模态）
 
 **已知无法运行：**
 - ❌ **Qwen/Qwen3.5-35B-A3B-GPTQ-Int4** - MoE + GPTQ Int4 量化组合存在兼容性问题，导致服务无法正常启动或推理失败
