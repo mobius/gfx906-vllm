@@ -23,6 +23,7 @@
 
 当前已测试并可用：
 - ✅ Qwen/Qwen3.5-0.8B（非多模态）
+- ✅ Qwen/Qwen3.5-2B（非多模态）
 - ✅ Qwen 系列模型（需使用 `--limit-mm-per-prompt '{"image": 0, "video": 0}'` 参数）
 
 ## 项目简介
