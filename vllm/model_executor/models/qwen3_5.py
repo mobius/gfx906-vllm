@@ -37,6 +37,7 @@ from vllm.config import (
 )
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import (
@@ -380,6 +381,8 @@ class Qwen3_5Model(Qwen3NextModel):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        # Track partition sizes for merged parameters to calculate correct offsets
+        partition_sizes: dict[str, dict[int, int]] = {}
         expert_params_mapping = self.get_expert_mapping()
         is_fused_expert = False
         fused_expert_params_mapping = [
@@ -435,11 +438,25 @@ class Qwen3_5Model(Qwen3NextModel):
                     hasattr(param, "load_merged_column_weight") and shard_id is not None
                 ):
                     # Handle merged column parallel parameters (e.g., gate_up_proj)
-                    # Calculate shard_offset and shard_size based on shard_id
+                    # Calculate shard_offset by accumulating previous partition sizes
                     if isinstance(shard_id, int):
                         # For gate_up_proj: shard_id 0 = gate, shard_id 1 = up
-                        shard_size = loaded_weight.size(param.output_dim)
-                        shard_offset = shard_id * shard_size
+                        # Use the sharded size from checkpoint, accounting for TP
+                        tp_size = get_tensor_model_parallel_world_size()
+                        shard_size = loaded_weight.size(param.output_dim) // tp_size
+
+                        # Track this partition's size for offset calculation
+                        if name not in partition_sizes:
+                            partition_sizes[name] = {}
+                        partition_sizes[name][shard_id] = shard_size
+
+                        # Calculate offset as sum of all previous partition sizes
+                        shard_offset = sum(
+                            size
+                            for sid, size in partition_sizes[name].items()
+                            if sid < shard_id
+                        )
+
                         param.load_merged_column_weight(
                             loaded_weight,
                             shard_offset=shard_offset,
@@ -450,9 +467,25 @@ class Qwen3_5Model(Qwen3NextModel):
                         num_heads = getattr(self.config, "num_attention_heads", None)
                         if num_heads:
                             # Calculate shard_size and offset for QKV
-                            shard_size = loaded_weight.size(param.output_dim)
+                            # Use the sharded size from checkpoint, accounting for TP
+                            tp_size = get_tensor_model_parallel_world_size()
+                            shard_size = loaded_weight.size(param.output_dim) // tp_size
+
+                            # Track this partition's size for offset calculation
+                            if name not in partition_sizes:
+                                partition_sizes[name] = {}
+                            # Convert string shard_id to integer for tracking
                             qkv_shard_map = {"q": 0, "k": 1, "v": 2}
-                            shard_offset = qkv_shard_map.get(shard_id, 0) * shard_size
+                            shard_id_int = qkv_shard_map.get(shard_id, 0)
+                            partition_sizes[name][shard_id_int] = shard_size
+
+                            # Calculate offset as sum of all previous partition sizes
+                            shard_offset = sum(
+                                size
+                                for sid, size in partition_sizes[name].items()
+                                if sid < shard_id_int
+                            )
+
                             param.load_qkv_weight(
                                 loaded_weight,
                                 shard_offset=shard_offset,
