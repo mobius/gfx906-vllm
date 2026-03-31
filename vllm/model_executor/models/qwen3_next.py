@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from itertools import islice
 
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
@@ -235,6 +236,37 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             self.num_spec,
         )
 
+    def create_qkvz_proj(
+        self,
+        hidden_size: int,
+        key_dim: int,
+        value_dim: int,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> ColumnParallelLinear:
+        return ColumnParallelLinear(
+            input_size=hidden_size,
+            output_size=key_dim * 2 + value_dim * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def create_ba_proj(
+        self,
+        hidden_size: int,
+        num_v_heads: int,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> ColumnParallelLinear:
+        return ColumnParallelLinear(
+            input_size=hidden_size,
+            output_size=num_v_heads * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
     def __init__(
         self,
         config: Qwen3NextConfig,
@@ -286,18 +318,17 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # projection of the input hidden states
         self.projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
         self.projection_size_ba = self.num_v_heads * 2
-        self.in_proj_qkvz = ColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.projection_size_qkvz,
-            bias=False,
+        self.in_proj_qkvz = self.create_qkvz_proj(
+            hidden_size=self.hidden_size,
+            key_dim=self.key_dim,
+            value_dim=self.value_dim,
             quant_config=quant_config,
             prefix=f"{prefix}.in_proj_qkvz",
         )
         # ba_proj doesn't support blockwise fp8 quantization.
-        self.in_proj_ba = ColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.projection_size_ba,
-            bias=False,
+        self.in_proj_ba = self.create_ba_proj(
+            hidden_size=self.hidden_size,
+            num_v_heads=self.num_v_heads,
             quant_config=quant_config,
             prefix=f"{prefix}.in_proj_ba",
         )
@@ -429,6 +460,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         )
         value = rearrange(value, "l (h d) -> 1 l h d", d=self.head_v_dim)
         return query.contiguous(), key.contiguous(), value.contiguous()
+
+    def _expand_qk_heads_for_gdn(
+        self,
+        query: torch.Tensor | None,
+        key: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if query is None or key is None:
+            return query, key
+
+        head_ratio = self.num_v_heads // self.num_k_heads
+        if head_ratio > 1:
+            query = query.repeat_interleave(head_ratio, dim=2)
+            key = key.repeat_interleave(head_ratio, dim=2)
+        return query.contiguous(), key.contiguous()
 
     def forward(
         self,
@@ -593,6 +638,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
             mixed_qkv_non_spec
         )
+        query_spec, key_spec = self._expand_qk_heads_for_gdn(query_spec, key_spec)
+        query_non_spec, key_non_spec = self._expand_qk_heads_for_gdn(
+            query_non_spec, key_non_spec
+        )
 
         g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
@@ -657,22 +706,51 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 ssm_state.dtype
             )
         elif attn_metadata.num_decodes > 0:
-            core_attn_out_non_spec, last_recurrent_state = (
-                fused_recurrent_gated_delta_rule(
+            capability = current_platform.get_device_capability()
+            if (
+                current_platform.is_rocm()
+                and capability is not None
+                and capability.major == 9
+                and capability.minor == 0
+            ):
+                initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
                     g=g_non_spec,
                     beta=beta_non_spec,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
+                    initial_state=initial_state,
+                    output_final_state=True,
                     cu_seqlens=non_spec_query_start_loc[
                         : attn_metadata.num_decodes + 1
                     ],
-                    ssm_state_indices=non_spec_state_indices_tensor,
+                    head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
-            )
+                ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
+            else:
+                core_attn_out_non_spec, last_recurrent_state = (
+                    fused_recurrent_gated_delta_rule(
+                        q=query_non_spec,
+                        k=key_non_spec,
+                        v=value_non_spec,
+                        g=g_non_spec,
+                        beta=beta_non_spec,
+                        initial_state=ssm_state,
+                        inplace_final_state=True,
+                        cu_seqlens=non_spec_query_start_loc[
+                            : attn_metadata.num_decodes + 1
+                        ],
+                        ssm_state_indices=non_spec_state_indices_tensor,
+                        use_qk_l2norm_in_kernel=True,
+                    )
+                )
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
@@ -1370,6 +1448,20 @@ def fused_gdn_gating(
     beta_output = b.sigmoid()
     TODO maybe use torch.compile to replace this triton kernel
     """
+    capability = current_platform.get_device_capability()
+    if (
+        current_platform.is_rocm()
+        and capability is not None
+        and capability.major == 9
+        and capability.minor == 0
+    ):
+        x = a.float() + dt_bias.view(1, -1).float()
+        g = -torch.exp(A_log.float()).view(1, -1) * F.softplus(
+            x, beta=beta, threshold=threshold
+        )
+        beta_output = torch.sigmoid(b.float()).to(b.dtype)
+        return g.unsqueeze(0), beta_output.unsqueeze(0)
+
     batch, num_heads = a.shape
     seq_len = 1
     grid = (batch, seq_len, triton.cdiv(num_heads, 8))

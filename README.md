@@ -30,6 +30,14 @@
 - **通用 Triton GEMM** - 使用 Triton 矩阵乘法替代 hipBLAS 回退，提高稳定性
 - **MoE + GPTQ 修复尝试** - 尝试修复 Qwen/Qwen3.5-35B-A3B-GPTQ-Int4，但该模型仍无法正常运行
 - **新增失败样例确认** - 实测 `cyankiwi/Qwen3.5-35B-A3B-AWQ-4bit` 在 ROCm 6.4 + gfx906 上仍无法稳定推理，可能表现为整串 `!` 输出或 `EngineCore` 崩溃
+- **新增 Qwen3.5 GGUF 实验性支持** - 补齐了 Qwen3.5 GGUF 在 gfx906/ROCm 6.3 下的部分加载、推理与 reasoning 处理链路
+- **新增 Qwen3.5 reasoning 处理修复** - 针对 Qwen3.5 GGUF 自动接入专用 reasoning parser，并修正 chat prompt 与 thinking scaffold 的处理逻辑
+- **Qwen3.5-0.8B-GGUF 已明显改善** - 实测 `unsloth/Qwen3.5-0.8B-GGUF` 的 `Qwen3.5-0.8B-UD-Q6_K_XL.gguf` 已可返回正确简单问答结果（如 `1+1=2`）
+- **Qwen3.5-27B-GGUF 仍属实验性质** - 实测 `unsloth/Qwen3.5-27B-GGUF` 的 `Qwen3.5-27B-UD-Q6_K_XL.gguf`：
+  - 简单问答已可走到正确答案路径（如 `1+1=2`）
+  - `/v1/models`、服务启动、基础 chat/completions 链路均已打通
+  - 但复杂推理问题在 gfx906 GPU 路径下仍可能出现题目复述、thinking 文本异常或推理质量不稳定
+- **当前结论** - Qwen3.5 GGUF 支持仍在持续完善中，27B 级别模型暂不建议视为稳定可用
 
 ### 支持的模型
 

@@ -24,8 +24,10 @@
 # limitations under the License.
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
+import os
 import typing
 from collections.abc import Callable, Iterable
+from inspect import signature
 
 import torch
 from einops import rearrange
@@ -37,13 +39,14 @@ from vllm.config import (
 )
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3_5RMSNorm,
 )
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
@@ -121,6 +124,84 @@ class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
 
 
 class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
+    def __init__(
+        self,
+        config: Qwen3_5TextConfig | Qwen3_5MoeTextConfig,
+        model_config=None,
+        cache_config=None,
+        quant_config: QuantizationConfig | None = None,
+        speculative_config=None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(
+            config=config,
+            model_config=model_config,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            speculative_config=speculative_config,
+            prefix=prefix,
+        )
+        del self.in_proj_qkvz
+        del self.in_proj_ba
+        self.in_proj_qkv = ColumnParallelLinear(
+            self.hidden_size,
+            self.key_dim * 2 + self.value_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj_qkv",
+        )
+        self.in_proj_z = ColumnParallelLinear(
+            self.hidden_size,
+            self.value_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj_z",
+        )
+        self.in_proj_b = ColumnParallelLinear(
+            self.hidden_size,
+            self.num_v_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj_b",
+        )
+        self.in_proj_a = ColumnParallelLinear(
+            self.hidden_size,
+            self.num_v_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj_a",
+        )
+
+    def _maybe_log_debug_stats(self, **tensors: torch.Tensor) -> None:
+        if os.getenv("VLLM_QWEN35_GGUF_DEBUG", "0") != "1":
+            return
+        target_prefix = os.getenv(
+            "VLLM_QWEN35_GGUF_DEBUG_LAYER", "model.layers.0.linear_attn"
+        )
+        if self.prefix != target_prefix or getattr(self, "_gguf_debug_logged", False):
+            return
+
+        self._gguf_debug_logged = True
+
+        def summarize(name: str, tensor: torch.Tensor) -> str:
+            tensor_f32 = tensor.detach().float()
+            finite = torch.isfinite(tensor_f32)
+            finite_ratio = finite.float().mean().item() if tensor.numel() else 1.0
+            return (
+                f"{name}: shape={tuple(tensor.shape)} "
+                f"mean={tensor_f32.mean().item():.6g} "
+                f"std={tensor_f32.std(unbiased=False).item():.6g} "
+                f"min={tensor_f32.min().item():.6g} "
+                f"max={tensor_f32.max().item():.6g} "
+                f"finite={finite_ratio:.6f}"
+            )
+
+        lines = [
+            f"[qwen3.5 debug] prefix={self.prefix}",
+            *[summarize(name, tensor) for name, tensor in tensors.items()],
+        ]
+        logger.warning("\n".join(lines))
+
     def fix_query_key_value_ordering(
         self,
         mixed_qkvz: torch.Tensor,
@@ -130,54 +211,40 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             "Qwen3.5 Series dont need to fix query key value ordering"
         )
 
-    def create_qkvz_proj(
-        self,
-        hidden_size: int,
-        key_dim: int,
-        value_dim: int,
-        quant_config: QuantizationConfig | None,
-        prefix: str,
-    ) -> MergedColumnParallelLinear:
-        return MergedColumnParallelLinear(
-            input_size=hidden_size,
-            output_sizes=[key_dim, key_dim, value_dim, value_dim],
-            bias=False,
-            quant_config=quant_config,
-            prefix=prefix,
-        )
-
     def forward(
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        """
-        Forward pass with three parts:
-        1. Input projection
-        2. Core attention (custom op)
-        3. Output projection
-        """
         num_tokens = hidden_states.size(0)
 
-        # ============================================================
-        # Part 1: Input Projection
-        # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-        z_size = self.value_dim // self.tp_size
-        mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+        mixed_qkv, _ = self.in_proj_qkv(hidden_states)
+        z, _ = self.in_proj_z(hidden_states)
+        b, _ = self.in_proj_b(hidden_states)
+        a, _ = self.in_proj_a(hidden_states)
+
         z = z.reshape(z.size(0), -1, self.head_v_dim)
-        ba, _ = self.in_proj_ba(hidden_states)
-        b, a = ba.chunk(2, dim=-1)
+        q, k, v = mixed_qkv.split(
+            [
+                self.key_dim // self.tp_size,
+                self.key_dim // self.tp_size,
+                self.value_dim // self.tp_size,
+            ],
+            dim=-1,
+        )
+        self._maybe_log_debug_stats(
+            hidden_states=hidden_states,
+            mixed_qkv=mixed_qkv,
+            q=q,
+            k=k,
+            v=v,
+            z=z,
+            b=b,
+            a=a,
+        )
 
         b = b.contiguous()
         a = a.contiguous()
-
-        # ============================================================
-        # Part 2: Core Attention (Custom Op)
-        # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
@@ -192,17 +259,16 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             self.prefix,
         )
 
-        # ============================================================
-        # Part 3: Output Projection
-        # ============================================================
         z_shape_og = z.shape
-        # Reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+    def _use_gfx906_chunk_decode_path(self) -> bool:
+        return False
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
@@ -309,12 +375,15 @@ class Qwen3_5Model(Qwen3NextModel):
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
+        self.quant_config = vllm_config.quant_config
 
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         def get_layer(prefix: str):
@@ -372,14 +441,10 @@ class Qwen3_5Model(Qwen3NextModel):
             # mlp
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            # GDN
-            ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
-            ("in_proj_qkvz", "in_proj_z", 3),
-            ("in_proj_ba", "in_proj_b", 0),
-            ("in_proj_ba", "in_proj_a", 1),
         ]
 
         params_dict = dict(self.named_parameters())
+        modules_dict = dict(self.named_modules())
         loaded_params: set[str] = set()
         # Track partition sizes for merged parameters to calculate correct offsets
         partition_sizes: dict[str, dict[int, int]] = {}
@@ -392,12 +457,133 @@ class Qwen3_5Model(Qwen3NextModel):
         num_experts = (
             self.config.num_experts if hasattr(self.config, "num_experts") else 0
         )
+
+        def get_split_sizes_for_param(
+            param_name: str, shard_ids: tuple[int, ...]
+        ) -> list[int] | None:
+            module_name, _, _ = param_name.rpartition(".")
+            if not module_name:
+                return None
+
+            module = modules_dict.get(module_name)
+            output_sizes = getattr(module, "output_sizes", None)
+            if output_sizes is None:
+                return None
+
+            max_shard_id = max(shard_ids)
+            if max_shard_id >= len(output_sizes):
+                return None
+
+            return [output_sizes[int(shard_id)] for shard_id in shard_ids]
+
+        def load_split_gguf_shards(
+            param_name,
+            param,
+            loaded_weight,
+            shard_ids,
+            weight_loader,
+        ):
+            split_sizes = get_split_sizes_for_param(param_name, shard_ids)
+
+            if getattr(param, "is_gguf_weight_type", False):
+                for sid in shard_ids:
+                    param.shard_weight_type[sid] = loaded_weight.item()
+                return
+
+            if getattr(param, "is_gguf_weight", False):
+                output_dim = getattr(param, "output_dim", 0)
+                if split_sizes is None:
+                    shard_size = loaded_weight.size(output_dim) // len(shard_ids)
+                    split_sizes = [shard_size] * len(shard_ids)
+                assert sum(split_sizes) == loaded_weight.size(output_dim), (
+                    f"Cannot split GGUF shard for {param_name}: expected logical sizes "
+                    f"{split_sizes}, got shape {tuple(loaded_weight.shape)} over dim "
+                    f"{output_dim}"
+                )
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_rank = get_tensor_model_parallel_rank()
+                split_offset = 0
+
+                for sid, shard_size in zip(shard_ids, split_sizes, strict=True):
+                    assert shard_size % tp_size == 0, (
+                        f"GGUF shard size {shard_size} for {param_name} is not divisible "
+                        f"by tensor parallel size {tp_size}"
+                    )
+                    local_shard = shard_size // tp_size
+                    start_idx = tp_rank * local_shard
+                    shard = loaded_weight.narrow(output_dim, split_offset, shard_size)
+                    shard = shard.narrow(output_dim, start_idx, local_shard)
+                    param.shard_id.append(sid)
+                    param.shard_id_map[sid] = len(param.data_container)
+                    param.data_container.append(shard)
+                    split_offset += shard_size
+                return
+
+            if loaded_weight.ndim == 0 or loaded_weight.numel() == 1:
+                for sid in shard_ids:
+                    weight_loader(param, loaded_weight, sid)
+                return
+
+            output_dim = getattr(param, "output_dim", 0)
+            if split_sizes is None:
+                shard_size = loaded_weight.size(output_dim) // len(shard_ids)
+                split_sizes = [shard_size] * len(shard_ids)
+            assert sum(split_sizes) == loaded_weight.size(output_dim), (
+                f"Cannot split GGUF shard for {param_name}: expected logical sizes "
+                f"{split_sizes}, got shape {tuple(loaded_weight.shape)} over dim "
+                f"{output_dim}"
+            )
+            split_offset = 0
+            tp_size = get_tensor_model_parallel_world_size()
+            for sid, shard_size in zip(shard_ids, split_sizes, strict=True):
+                shard = loaded_weight.narrow(output_dim, split_offset, shard_size)
+                if hasattr(param, "load_merged_column_weight"):
+                    param.load_merged_column_weight(
+                        loaded_weight=shard,
+                        shard_id=sid,
+                        shard_offset=split_offset // tp_size,
+                        shard_size=shard_size // tp_size,
+                    )
+                elif "loaded_shard_id" in signature(weight_loader).parameters:
+                    weight_loader(param, shard, loaded_shard_id=sid)
+                else:
+                    weight_loader(param, shard, sid)
+                split_offset += shard_size
+
+        def load_single_gguf_shard(param, loaded_weight, shard_id):
+            if getattr(param, "is_gguf_weight_type", False):
+                param.shard_weight_type[shard_id] = loaded_weight.item()
+                return
+
+            if getattr(param, "is_gguf_weight", False):
+                output_dim = getattr(param, "output_dim", 0)
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_rank = get_tensor_model_parallel_rank()
+                local_shard = loaded_weight.size(output_dim) // tp_size
+                start_idx = tp_rank * local_shard
+                shard = loaded_weight.narrow(output_dim, start_idx, local_shard)
+                param.shard_id.append(shard_id)
+                param.shard_id_map[shard_id] = len(param.data_container)
+                param.data_container.append(shard)
+                return
+
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
 
             if name.startswith("mtp."):
                 continue
+
+            if self.quant_config is not None and self.quant_config.get_name() == "gguf":
+                module_name, _, param_leaf = name.rpartition(".")
+                module = modules_dict.get(module_name)
+                if param_leaf == "weight" and isinstance(module, Qwen3_5RMSNorm):
+                    loaded_weight = loaded_weight - 1.0
+
+                if name.endswith("A_log"):
+                    loaded_weight = torch.log(-loaded_weight)
+            elif name.endswith("A_log"):
+                loaded_weight = torch.log(-loaded_weight)
 
             # Remapping the name of FP8 kv-scale.
             if name.endswith("scale"):
@@ -428,6 +614,22 @@ class Qwen3_5Model(Qwen3NextModel):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
+                if isinstance(shard_id, tuple):
+                    if getattr(param, "is_gguf_weight", False) or getattr(
+                        param, "is_gguf_weight_type", False
+                    ):
+                        load_split_gguf_shards(
+                            name, param, loaded_weight, shard_id, weight_loader
+                        )
+                    else:
+                        weight_loader(param, loaded_weight, shard_id)
+                    break
+                if shard_id is not None and (
+                    getattr(param, "is_gguf_weight", False)
+                    or getattr(param, "is_gguf_weight_type", False)
+                ):
+                    load_single_gguf_shard(param, loaded_weight, shard_id)
+                    break
                 # Check if weight_loader accepts shard_id parameter
                 import inspect
 
@@ -496,9 +698,21 @@ class Qwen3_5Model(Qwen3NextModel):
                         else:
                             weight_loader(param, loaded_weight)
                     else:
-                        weight_loader(param, loaded_weight)
+                        try:
+                            weight_loader(param, loaded_weight)
+                        except AssertionError as exc:
+                            raise AssertionError(
+                                f"Failed loading {name}: param shape {tuple(param.shape)} "
+                                f"vs weight shape {tuple(loaded_weight.shape)}"
+                            ) from exc
                 else:
-                    weight_loader(param, loaded_weight)
+                    try:
+                        weight_loader(param, loaded_weight)
+                    except AssertionError as exc:
+                        raise AssertionError(
+                            f"Failed loading {name}: param shape {tuple(param.shape)} "
+                            f"vs weight shape {tuple(loaded_weight.shape)}"
+                        ) from exc
                 break
             else:
                 is_expert_weight = False
@@ -583,7 +797,13 @@ class Qwen3_5Model(Qwen3NextModel):
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
-                    weight_loader(param, loaded_weight)
+                    try:
+                        weight_loader(param, loaded_weight)
+                    except AssertionError as exc:
+                        raise AssertionError(
+                            f"Failed loading {name}: param shape {tuple(param.shape)} "
+                            f"vs weight shape {tuple(loaded_weight.shape)}"
+                        ) from exc
             loaded_params.add(name)
         return loaded_params
 
@@ -601,9 +821,6 @@ class Qwen3_5ForCausalLMBase(
             "v_proj",
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
-        # GDN fused projections.
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
-        "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -634,6 +851,7 @@ class Qwen3_5ForCausalLMBase(
                 self.lm_head = ParallelLMHead(
                     config.vocab_size,
                     config.hidden_size,
+                    quant_config=self.quant_config,
                     prefix=maybe_prefix(prefix, "lm_head"),
                 )
         else:
@@ -704,10 +922,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     # Qwen3.5 does not support multimodal pruning (EVS).
     supports_multimodal_pruning = False
 
-    packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
-        "in_proj_ba": ["in_proj_b", "in_proj_a"],
-    }
+    packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
@@ -718,17 +933,23 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
         self.config = config
         self.multimodal_config = multimodal_config
-        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.use_data_parallel = (
+            multimodal_config is not None
+            and multimodal_config.mm_encoder_tp_mode == "data"
+        )
         # Qwen3.5 does not support multimodal pruning (EVS).
         self.is_multimodal_pruning_enabled = False
 
-        with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.visual = Qwen3_VisionTransformer(
-                config.vision_config,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "visual"),
-            )
+        if multimodal_config is not None:
+            with self._mark_tower_model(vllm_config, {"image", "video"}):
+                self.visual = Qwen3_VisionTransformer(
+                    config.vision_config,
+                    norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "visual"),
+                )
+        else:
+            self.visual = PPMissingLayer()
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5ForCausalLM(
@@ -772,6 +993,17 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             "Qwen3.5 does not support multimodal pruning (EVS). "
             "recompute_mrope_positions should never be called."
         )
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> tuple[torch.Tensor, int]:
+        if self.multimodal_config is None:
+            text_len = len(input_tokens)
+            positions = torch.arange(text_len, dtype=torch.long)
+            return positions.unsqueeze(0).expand(3, -1), 0
+        return super().get_mrope_input_positions(input_tokens, mm_features)
 
     def forward(
         self,

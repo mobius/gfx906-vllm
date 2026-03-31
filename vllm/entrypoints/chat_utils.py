@@ -1761,13 +1761,22 @@ def apply_hf_chat_template(
     )
 
     try:
-        return tokenizer.apply_chat_template(
+        rendered = tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
             chat_template=hf_chat_template,
             tokenize=False,
             **resolved_kwargs,
         )
+        if (
+            model_config.hf_config.model_type.startswith("qwen3_5")
+            and model_config.quantization == "gguf"
+        ):
+            for suffix in ("<think>\n\n</think>\n\n", "<think>\n"):
+                if rendered.endswith(f"<|im_start|>assistant\n{suffix}"):
+                    rendered = rendered[: -len(suffix)]
+                    break
+        return rendered
 
     # External library exceptions can sometimes occur despite the framework's
     # internal exception management capabilities.

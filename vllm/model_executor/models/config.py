@@ -224,6 +224,24 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         vllm_config.model_config.hf_config.method = "from_2_way_softmax"
 
 
+class Qwen3_5ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        structured_outputs_config = vllm_config.structured_outputs_config
+        model_config = vllm_config.model_config
+        hf_config = model_config.hf_config
+
+        if (
+            structured_outputs_config.reasoning_parser == ""
+            and model_config.quantization == "gguf"
+            and getattr(hf_config, "model_type", "").startswith("qwen3_5")
+        ):
+            structured_outputs_config.reasoning_parser = "qwen3_5"
+            logger.info(
+                "Using qwen3_5 reasoning parser for Qwen3.5 GGUF model."
+            )
+
+
 class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -526,6 +544,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
+    "Qwen3_5ForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
