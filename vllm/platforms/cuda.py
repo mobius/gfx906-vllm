@@ -295,7 +295,17 @@ class CudaPlatformBase(Platform):
         valid_backends_priorities = []
         invalid_reasons = {}
 
-        backend_priorities = _get_backend_priorities(use_mla, device_capability)
+        # TurboQuant KV cache: route directly to TQ backend
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
+            return [(AttentionBackendEnum.TURBOQUANT, 0)], {}
+
+        backend_priorities = _get_backend_priorities(
+            attn_selector_config.use_mla,
+            device_capability,
+            num_heads,
+            attn_selector_config.kv_cache_dtype,
+        )
         for priority, backend in enumerate(backend_priorities):
             try:
                 backend_class = backend.get_class()

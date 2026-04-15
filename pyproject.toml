@@ -300,6 +300,10 @@ extend-ignore-re = []
 windo = "windo"
 
 [tool.typos.type.vimscript.extend-words]
+ure = "ure"
+# Walsh-Hadamard Transform
+wht = "wht"
+WHT = "WHT"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]

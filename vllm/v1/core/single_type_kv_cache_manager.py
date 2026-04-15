@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
+    TQFullAttentionSpec,
 )
 from vllm.v1.request import Request
 
@@ -116,8 +117,27 @@ class SingleTypeKVCacheManager(ABC):
             req_blocks.extend(new_computed_blocks)
             self.num_cached_block[request_id] = len(new_computed_blocks)
         else:
-            # A running request. Should not have new computed blocks.
-            assert len(new_computed_blocks) == 0
+            assert not any(new_computed_blocks), (
+                "Computed blocks should be empty when prefix caching is disabled"
+            )
+
+        # Skip blocks are padded with null blocks.
+        req_blocks.extend([self._null_block] * num_skipped_blocks)
+        # Add the remaining computed blocks.
+        req_blocks.extend(new_computed_blocks)
+        # All cached hits (including skipped nulls) are already cached; mark
+        # them so cache_blocks() will not try to re-cache blocks that already
+        # have a block_hash set.
+        self.num_cached_block[request_id] = len(req_blocks)
+
+        if num_external_computed_tokens > 0:
+            # Allocate new blocks for external computed tokens.
+            allocated_blocks = self.block_pool.get_new_blocks(
+                cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
+            )
+            req_blocks.extend(allocated_blocks)
+            if type(self.kv_cache_spec) in (FullAttentionSpec, TQFullAttentionSpec):
+                self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int
@@ -142,6 +162,8 @@ class SingleTypeKVCacheManager(ABC):
         else:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
+            if type(self.kv_cache_spec) in (FullAttentionSpec, TQFullAttentionSpec):
+                self.new_block_ids.extend(b.block_id for b in new_blocks)
             return new_blocks
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
@@ -785,6 +807,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
+    TQFullAttentionSpec: FullAttentionManager,
     MLAAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,

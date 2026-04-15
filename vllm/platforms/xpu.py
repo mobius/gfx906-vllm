@@ -59,6 +59,11 @@ class XPUPlatform(Platform):
             "only NHD layout is supported by XPU attention kernels."
         )
 
+        # TurboQuant KV cache: route directly to TQ backend
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
+            logger.info_once("Using TurboQuant attention backend.")
+            return AttentionBackendEnum.TURBOQUANT.get_path()
+
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
