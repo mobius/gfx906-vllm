@@ -399,6 +399,8 @@ def _get_backend_priorities(
 
     # Default: Triton Unified Attention
     backends.append(AttentionBackendEnum.TRITON_ATTN)
+    # TurboQuant KV cache compression (gfx906: FP8 preset not supported, use 4bit_nc)
+    backends.append(AttentionBackendEnum.TURBOQUANT)
     return backends
 
 
