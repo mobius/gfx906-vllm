@@ -229,10 +229,18 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
         major = int(digits[0])
         minor = int(digits[1])
     elif n == 4:
-        # 2-digit major: gfx10xx, gfx11xx, gfx12xx
-        # major(2) + minor(1) + stepping(1)
-        major = int(digits[:2])
-        minor = int(digits[2])
+        # Could be 2-digit major (gfx10xx, gfx11xx, gfx12xx)
+        # OR gfx9-family with 4-digit AMDSMI format (e.g. gfx9006 = MI50)
+        if digits[0] == "9":
+            # gfx9xxx: single-digit major, treat as major=9, minor=int(digits[1])
+            # e.g. gfx9006 -> major=9, minor=0 (MI50 gfx906)
+            major = int(digits[0])
+            minor = int(digits[1])
+        else:
+            # 2-digit major: gfx10xx, gfx11xx, gfx12xx
+            # major(2) + minor(1) + stepping(1)
+            major = int(digits[:2])
+            minor = int(digits[2])
     elif n >= 5:
         raise ValueError(
             f"GCN arch '{gcn_arch}' has {n} digits after 'gfx', which "
@@ -388,11 +396,18 @@ def _get_backend_priorities(
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
 
     # Priority 3: Check for ROCM_ATTN (prefill-decode split)
-    from vllm.config import get_current_vllm_config_or_none
-
-    vllm_config = get_current_vllm_config_or_none()
+    try:
+        from vllm.config import get_current_vllm_config_or_none
+        vllm_config = get_current_vllm_config_or_none()
+    except ImportError:
+        from vllm.config import get_current_vllm_config
+        try:
+            vllm_config = get_current_vllm_config()
+        except Exception:
+            vllm_config = None
     if (
         vllm_config is not None
+        and hasattr(vllm_config, 'attention_config')
         and vllm_config.attention_config.use_prefill_decode_attention
     ):
         backends.append(AttentionBackendEnum.ROCM_ATTN)
@@ -426,6 +441,10 @@ class RocmPlatform(Platform):
         gfx9系列(including gfx906)的warp size为64，
         不支持bitsandbytes(需要warp size 32)。
         """
+        return self.__class__._get_supported_quantization()
+
+    @classmethod
+    def _get_supported_quantization(cls) -> list[str]:
         base_quantization = [
             "awq",
             "awq_marlin",  # will be overwritten with awq
@@ -674,8 +693,8 @@ class RocmPlatform(Platform):
         logger.info_once("Using Torch SDPA backend for ViT model.")
         return ViTAttentionBackendEnum.TORCH_SDPA
 
-    @classmethod
-    def supported_dtypes(cls) -> list[torch.dtype]:
+    @property
+    def supported_dtypes(self) -> list[torch.dtype]:
         """返回该平台支持的数据类型列表
 
         gfx906硬件不支持bfloat16，因此只返回float16和float32。
@@ -856,7 +875,14 @@ class RocmPlatform(Platform):
 
     @classmethod
     def verify_quantization(cls, quant: str) -> None:
-        super().verify_quantization(quant)
+        # 绕过基类 cls.supported_quantization property 访问问题
+        # 直接用 _get_supported_quantization() 来检查
+        supported = cls._get_supported_quantization()
+        if supported and quant not in supported:
+            raise ValueError(
+                f"Quantization '{quant}' is not supported on {cls.__name__}. "
+                f"Supported quantization methods: {supported}"
+            )
 
         # gfx906不支持bitsandbytes检查
         if quant == "bitsandbytes" and "gfx906" in _GCN_ARCH:
@@ -966,7 +992,10 @@ class RocmPlatform(Platform):
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
         # 新增：首先检查supported_dtypes
-        supported = cls.supported_dtypes()
+        if "gfx906" in _GCN_ARCH:
+            supported = [torch.float16, torch.float32]
+        else:
+            supported = [torch.float16, torch.bfloat16, torch.float32]
         if dtype not in supported:
             gpu_name = cls.get_device_name()
             raise ValueError(

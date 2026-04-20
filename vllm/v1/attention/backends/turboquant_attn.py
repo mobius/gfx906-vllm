@@ -24,21 +24,23 @@ from typing import Any, ClassVar
 import torch
 import torch.nn.functional as F
 
-from vllm.config import get_current_vllm_config
-from vllm.config.cache import CacheDType
-from vllm.triton_utils import triton
-from vllm.v1.attention.backend import (
+from vllm.attention.backends.abstract import (
     AttentionBackend,
-    AttentionCGSupport,
     AttentionImpl,
     AttentionLayer,
     AttentionMetadata,
-    AttentionMetadataBuilder,
     AttentionType,
-    CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.fa_utils import (
+from vllm.config import get_current_vllm_config
+from vllm.config.cache import CacheDType
+from vllm.triton_utils import triton
+from vllm.v1.attention.backends.utils import (
+    AttentionCGSupport,
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.flash_attn import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -51,7 +53,7 @@ from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_stor
 
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
-    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+    from vllm.v1.attention.backends.flash_attn import flash_attn_varlen_func
 
 # Continuation prefill: for small continuation chunks (q_len ≤ threshold),
 # use the TQ decode kernel directly instead of full-dequant + flash_attn.
@@ -82,7 +84,11 @@ def _build_hadamard_cached(d: int, device_str: str) -> torch.Tensor:
 class TurboQuantAttentionBackend(AttentionBackend):
     """Attention backend using TurboQuant KV-cache compression."""
 
-    accept_output_buffer: bool = True
+    # Set to False so Attention.forward() uses the return value rather than
+    # an output buffer. This avoids the buffer aliasing issue where
+    # torch.ops custom ops create a copy of view tensors for mutates_args,
+    # preventing writes from propagating back to the original tensor.
+    accept_output_buffer: bool = False
     forward_includes_kv_cache_update: bool = False
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [
@@ -106,7 +112,8 @@ class TurboQuantAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        return attn_type == AttentionType.DECODER
+        # None means unspecified (treat as DECODER-compatible)
+        return attn_type is None or attn_type == AttentionType.DECODER
 
     @classmethod
     def supports_per_head_quant_scales(cls) -> bool:
@@ -274,9 +281,13 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Fixed NUM_KV_SPLITS (grid dims must be constant for cudagraph,
         # and benchmarks show no regression vs dynamic in eager mode).
         vllm_config = get_current_vllm_config()
-        self.max_num_kv_splits = (
-            vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
-        )
+        # Fallback for older VllmConfig without attention_config (gfx906-vllm)
+        try:
+            self.max_num_kv_splits = (
+                vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
+            )
+        except AttributeError:
+            self.max_num_kv_splits = 32  # default value from TurboQuant PR
 
     def _ensure_on_device(self, layer, device):
         """One-time derivation of TQ buffers (rotation matrix, midpoints).
@@ -366,9 +377,20 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         PiT = tq_layer._tq_PiT
         centroids = tq_layer._tq_centroids
 
-        # Compute attention (KV cache was already updated by do_kv_cache_update)
-        # With reorder_batch_threshold=1, decodes come first in the batch.
-        # num_decodes/num_decode_tokens from metadata give the split point.
+        # Compute attention
+        # NOTE: In gfx906-vllm, do_kv_cache_update is NOT called externally.
+        # We must store K/V here before computing attention.
+        import os as _store_os
+        if _store_os.environ.get('TQ_DISABLE_STORE', '0') != '1':
+            slot_mapping = attn_metadata.slot_mapping[:N]
+            if slot_mapping is not None and slot_mapping.shape[0] > 0:
+                k_to_store = key[:N].view(N, self.num_kv_heads, self.head_size)
+                v_to_store = value[:N].view(N, self.num_kv_heads, self.head_size)
+                # Ensure int32 for TurboQuant store kernel compatibility
+                if slot_mapping.dtype != torch.int32:
+                    slot_mapping = slot_mapping.to(torch.int32)
+                self._store_kv(k_to_store, v_to_store, kv_cache, slot_mapping, tq_layer)
+
         num_decodes = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
 
@@ -455,6 +477,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             output[:N] = attn_out.to(output.dtype)
         else:
             output[:N] = attn_out.reshape(N, -1).to(output.dtype)
+
         return output
 
     # ------------------------------------------------------------------ #
@@ -777,9 +800,72 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             output_buf = getattr(layer, "_tq_output_buf", None)
             lse_buf = getattr(layer, "_tq_lse_buf", None)
 
+        # Capture real data for offline analysis (first decode only, layer 0 only)
+        import os as _os
+        _capture = _os.environ.get('TQ_CAPTURE', '0') == '1'
+        _capture_all = _os.environ.get('TQ_CAPTURE_ALL', '0') == '1'
+        if (_capture or _capture_all) and not hasattr(self, '_tq_captured'):
+            self._tq_captured = True
+            import pickle as _pkl
+            kv_c = kv_cache.contiguous()
+            data = {
+                'kv_bytes': kv_c.cpu().numpy().tobytes(),
+                'kv_shape': tuple(kv_c.shape),
+                'query': query.cpu().numpy().tobytes(),
+                'query_shape': tuple(query.shape),
+                'block_table': attn_metadata.block_table.cpu().numpy().tobytes(),
+                'bt_shape': tuple(attn_metadata.block_table.shape),
+                'seq_lens': attn_metadata.seq_lens.cpu().numpy().tolist(),
+                'blk_idx': attn_metadata.block_table[0, 0].item(),
+                # TQ config
+                'mse_bits': self.tq_config.key_mse_bits,
+                'key_packed_size': self.tq_config.key_packed_size,
+                'value_quant_bits': self.tq_config.effective_value_quant_bits,
+                'norm_correction': self.tq_config.norm_correction,
+                'key_fp8': self.tq_config.key_fp8,
+                'scale': self.scale,
+                # Matrices
+                'Pi': Pi.cpu().numpy().tobytes(),
+                'Pi_shape': tuple(Pi.shape),
+                'centroids': centroids.cpu().numpy().tobytes(),
+                'centroids_shape': tuple(centroids.shape),
+            }
+            _pkl.dump(data, open('/tmp/tq_capture.pkl', 'wb'))
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "[TQ_CAPTURE] saved to /tmp/tq_capture.pkl blk=%d seq=%s layer query[:3]=%s",
+                data['blk_idx'], data['seq_lens'], query[0, 0, :3].tolist()
+            )
+
+        # Use continuation_prefill fallback for full validation
+        if _os.environ.get('TQ_PREFILL_FALLBACK', '0') == '1':
+            B2, Hq2, D2 = query.shape
+            Hk2 = kv_cache.shape[2]
+            outputs = []
+            for i in range(B2):
+                seq_len2 = attn_metadata.seq_lens[i].item()
+                bt2 = attn_metadata.block_table[i:i+1]
+                # Dequant all cached tokens + current query → attention
+                k_empty = torch.zeros(0, Hk2, D2, dtype=query.dtype, device=query.device)
+                v_empty = torch.zeros(0, Hk2, D2, dtype=query.dtype, device=query.device)
+                out_i = self._continuation_prefill(
+                    layer=layer,
+                    query=query[i:i+1].view(1, Hq2, D2),
+                    key_chunk=k_empty,
+                    val_chunk=v_empty,
+                    kv_cache=kv_cache,
+                    block_table=bt2,
+                    cached_len=seq_len2,
+                    seq_len=seq_len2,
+                    Pi=Pi,
+                    centroids=centroids,
+                )
+                outputs.append(out_i.view(1, Hq2, D2))
+            return torch.cat(outputs, dim=0)
+
         result = triton_turboquant_decode_attention(
             query=query,
-            kv_cache=kv_cache,
+            kv_cache=kv_cache.contiguous(),  # ensure contiguous for Triton
             block_table=attn_metadata.block_table,
             seq_lens=attn_metadata.seq_lens,
             Pi=Pi,
@@ -791,10 +877,90 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             key_fp8=self.tq_config.key_fp8,
             norm_correction=self.tq_config.norm_correction,
             PiT=PiT,
-            mid_o_buf=mid_o_buf,
-            output_buf=output_buf,
-            lse_buf=lse_buf,
-            buf_holder=layer,
+            mid_o_buf=None,    # disable buffer reuse
+            output_buf=None,   # disable buffer reuse
+            lse_buf=None,      # disable buffer reuse
+            buf_holder=None,   # disable buffer reuse
             max_num_kv_splits=self.max_num_kv_splits,
         )
+
+        # Append decode output to capture file (atomic: only on first call)
+        if _capture and hasattr(self, '_tq_captured') and not hasattr(self, '_tq_output_saved'):
+            self._tq_output_saved = True
+            try:
+                import pickle as _pkl2, os as _os2, logging as _log2
+                save_path = '/tmp/tq_capture.pkl'
+                if _os2.path.exists(save_path):
+                    data2 = _pkl2.load(open(save_path, 'rb'))
+                    data2['tq_output'] = result.cpu().numpy().tobytes()
+                    data2['tq_output_shape'] = tuple(result.shape)
+                    data2['tq_out_std'] = result.float().std().item()
+                    data2['tq_out_mean_abs'] = result.float().abs().mean().item()
+                    _pkl2.dump(data2, open(save_path, 'wb'))
+                    _log2.getLogger(__name__).warning(
+                        "[TQ_CAPTURE] output saved std=%.4f mean=%.4f out[:3]=%s",
+                        data2['tq_out_std'], data2['tq_out_mean_abs'],
+                        result[0, 0, :3].tolist()
+                    )
+            except Exception as _e:
+                pass
+
         return result
+
+    def _fallback_decode_attention(
+        self,
+        query: torch.Tensor,  # (B, Hq, D)
+        kv_cache: torch.Tensor,
+        attn_metadata: "TurboQuantMetadata",
+        Pi: torch.Tensor,
+        centroids: torch.Tensor,
+        layer: Any,
+    ) -> torch.Tensor:
+        """Fallback decode using continuation_prefill path (dequant + flash_attn).
+        
+        Slower but uses the same code path as continuation prefill.
+        Used for validation that the decode output should match this.
+        """
+        B, Hq, D = query.shape
+        Hk = kv_cache.shape[2]
+        device = query.device
+        
+        outputs = []
+        for i in range(B):
+            seq_len = attn_metadata.seq_lens[i].item()
+            bt = attn_metadata.block_table[i:i+1]
+            
+            # Use continuation_prefill to get attention output
+            # Create fake q_start/seq metadata
+            q_fake = query[i:i+1].view(1, Hq, D)
+            k_fake = torch.zeros(0, Hk, D, dtype=query.dtype, device=device)
+            v_fake = torch.zeros(0, Hk, D, dtype=query.dtype, device=device)
+            
+            meta_i = TurboQuantMetadata(
+                seq_lens=attn_metadata.seq_lens[i:i+1],
+                slot_mapping=torch.zeros(0, dtype=torch.int32, device=device),
+                block_table=bt,
+                query_start_loc=torch.tensor([0, 1], dtype=torch.int32, device=device),
+                num_actual_tokens=1,
+                max_query_len=1,
+                max_seq_len=seq_len,
+                is_prefill=True,
+                num_decodes=0,
+                num_decode_tokens=0,
+            )
+            
+            out_i = self._continuation_prefill(
+                layer=layer,
+                query=q_fake.view(1, Hq, D),
+                key_chunk=k_fake,
+                val_chunk=v_fake,
+                kv_cache=kv_cache,
+                block_table=bt,
+                cached_len=seq_len,
+                seq_len=seq_len,
+                Pi=Pi,
+                centroids=centroids,
+            )
+            outputs.append(out_i.view(1, Hq, D))
+        
+        return torch.cat(outputs, dim=0)

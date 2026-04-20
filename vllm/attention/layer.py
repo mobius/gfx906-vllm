@@ -270,6 +270,17 @@ class Attention(nn.Module, AttentionLayerBase):
         # and let torch.compile handle them.
         self.use_direct_call = not current_platform.opaque_attention_op()
 
+        # TurboQuant backend requires direct call to correctly mutate output tensor.
+        # When using torch.ops custom op, PyTorch may create a copy of view tensors
+        # for mutates_args, causing impl.forward to write into the copy rather than
+        # the original output tensor. TurboQuant depends on in-place mutation.
+        if backend_name == 'TURBOQUANT':
+            # Note: do NOT force use_direct_call=True for TURBOQUANT
+            # The torch.ops path is needed for correct hidden_states buffer management
+            # use_direct_call=True causes buffer aliasing where compute_logits receives
+            # stale data from the layer 0 attention output buffer
+            pass
+
         self.use_output = self.attn_backend.accept_output_buffer
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -306,6 +317,53 @@ class Attention(nn.Module, AttentionLayerBase):
             and self.impl.supports_quant_query_input()
         ):
             self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+
+        # Initialize TurboQuant buffers if turboquant kv cache dtype
+        if hasattr(self, 'kv_cache_dtype') and isinstance(self.kv_cache_dtype, str) \
+                and self.kv_cache_dtype.startswith("turboquant_"):
+            self._init_turboquant_buffers(self.kv_cache_dtype, head_size)
+
+    def _init_turboquant_buffers(self, cache_dtype: str, head_size: int) -> None:
+        """Initialize TurboQuant centroids and rotation matrices."""
+        from vllm.model_executor.layers.quantization.turboquant.centroids import (
+            get_centroids,
+        )
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            TurboQuantConfig,
+        )
+        import torch as _torch
+        tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
+        self._tq_config = tq_config
+        # centroids for Lloyd-Max quantization
+        self.register_buffer(
+            "_tq_centroids",
+            get_centroids(head_size, tq_config.centroid_bits),
+        )
+        # Pre-compute decode intermediate buffers (moved to GPU by model.to())
+        _vllm_cfg = get_current_vllm_config()
+        B = _vllm_cfg.scheduler_config.max_num_seqs
+        Hq = self.num_heads
+        # max_kv_splits fallback for gfx906-vllm (no attention_config)
+        try:
+            S = _vllm_cfg.attention_config.tq_max_kv_splits_for_cuda_graph
+        except AttributeError:
+            S = 32
+        D = head_size
+        self.register_buffer(
+            "_tq_mid_o_buf",
+            _torch.empty(B, Hq, S, D + 1, dtype=_torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_tq_output_buf",
+            _torch.empty(B, Hq, D, dtype=_torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_tq_lse_buf",
+            _torch.empty(B, Hq, dtype=_torch.float32),
+            persistent=False,
+        )
 
     def forward(
         self,
@@ -367,7 +425,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name
                 )
-            return output.view(-1, hidden_size)
+            ret = output.view(-1, hidden_size)
+            return ret
         else:
             if self.use_direct_call:
                 forward_context = get_forward_context()
@@ -422,6 +481,30 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
                 sliding_window=self.sliding_window,
+            )
+        elif hasattr(self, 'kv_cache_dtype') and isinstance(self.kv_cache_dtype, str) \
+                and self.kv_cache_dtype.startswith("turboquant_"):
+            # TurboQuant: compressed uint8 KV cache layout
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+            tq_config = TurboQuantConfig.from_cache_dtype(
+                self.kv_cache_dtype, self.head_size
+            )
+            import logging as _log
+            _log.getLogger(__name__).info(
+                "[TurboQuant] kv_cache_dtype=%s head_size=%s slot_size=%s page_size=%s",
+                self.kv_cache_dtype, self.head_size,
+                tq_config.slot_size_aligned,
+                block_size * self.num_kv_heads * tq_config.slot_size_aligned,
+            )
+            return TQFullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                dtype=self.kv_cache_torch_dtype,  # torch.uint8
+                tq_slot_size=tq_config.slot_size_aligned,
             )
         else:
             return FullAttentionSpec(

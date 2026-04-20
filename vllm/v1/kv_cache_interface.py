@@ -158,33 +158,7 @@ class FullAttentionSpec(AttentionSpec):
         return merged_spec
 
 
-@dataclass(frozen=True, kw_only=True)
-class TQFullAttentionSpec(FullAttentionSpec):
-    """FullAttentionSpec with TQ-aware page size.
-
-    Python equivalent of the C++ TQ4FullAttentionSpec. Overrides
-    real_page_size_bytes to use TQ slot bytes instead of the raw
-    head_size * dtype formula.
-    """
-
-    tq_slot_size: int = 0
-
-    @property
-    def real_page_size_bytes(self) -> int:
-        if self.tq_slot_size > 0:
-            return self.block_size * self.num_kv_heads * self.tq_slot_size
-        return super().real_page_size_bytes
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        merged = super().merge(specs)
-        assert all(s.tq_slot_size == specs[0].tq_slot_size for s in specs), (
-            "All TQ layers in the same KV cache group must use the same tq_slot_size."
-        )
-        return replace(merged, tq_slot_size=specs[0].tq_slot_size)
-
-
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True)
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
@@ -428,3 +402,49 @@ class KVCacheConfig:
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
+
+
+@dataclass(frozen=True)
+class TQFullAttentionSpec(FullAttentionSpec):
+    """KV cache spec for TurboQuant compressed attention.
+
+    Extends FullAttentionSpec with tq_slot_size for the packed KV layout.
+    Uses standard FullAttentionManager for block allocation (compatible with
+    gfx906-vllm's KV cache manager which doesn't have new_block_ids).
+    """
+    tq_slot_size: int = 0  # bytes per (head, position) slot in TQ cache
+
+    @property
+    def page_size_bytes(self) -> int:
+        """TurboQuant page size: block_size * num_kv_heads * slot_size (uint8)."""
+        return self.block_size * self.num_kv_heads * self.tq_slot_size
+
+    @classmethod
+    def merge(cls, specs: list) -> "TQFullAttentionSpec":
+        """Merge TQFullAttentionSpec instances — all must have same tq_slot_size."""
+        assert all(isinstance(spec, TQFullAttentionSpec) for spec in specs), (
+            "All specs in TQFullAttentionSpec.merge must be TQFullAttentionSpec"
+        )
+        tq_slot_sizes = {spec.tq_slot_size for spec in specs}
+        assert len(tq_slot_sizes) == 1, (
+            f"All TQ specs must have same tq_slot_size, got {tq_slot_sizes}"
+        )
+        # Use parent merge logic but reconstruct as TQFullAttentionSpec
+        parent = FullAttentionSpec.merge.__func__(FullAttentionSpec, specs)
+        return TQFullAttentionSpec(
+            block_size=parent.block_size,
+            num_kv_heads=parent.num_kv_heads,
+            head_size=parent.head_size,
+            dtype=parent.dtype,
+            sliding_window=parent.sliding_window,
+            attention_chunk_size=parent.attention_chunk_size,
+            tq_slot_size=specs[0].tq_slot_size,
+        )
+
+    def max_memory_usage_bytes(self, vllm_config) -> int:
+        """Override to use tq_slot_size for memory calculation."""
+        import math
+        max_model_len = vllm_config.model_config.max_model_len
+        block_size = self.block_size
+        num_blocks = math.ceil(max_model_len / block_size)
+        return num_blocks * self.page_size_bytes
