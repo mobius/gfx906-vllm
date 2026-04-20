@@ -11,6 +11,7 @@ from .deepseek_scaling_rope import DeepseekScalingRotaryEmbedding
 from .dual_chunk_rope import DualChunkRotaryEmbedding
 from .dynamic_ntk_alpha_rope import DynamicNTKAlphaRotaryEmbedding
 from .dynamic_ntk_scaling_rope import DynamicNTKScalingRotaryEmbedding
+from .gemma4_rope import Gemma4RotaryEmbedding
 from .linear_scaling_rope import LinearScalingRotaryEmbedding
 from .llama3_rope import Llama3RotaryEmbedding
 from .llama4_vision_rope import Llama4VisionRotaryEmbedding
@@ -25,14 +26,18 @@ _ROPE_DICT: dict[tuple, RotaryEmbedding] = {}
 
 def get_rope(
     head_size: int,
-    rotary_dim: int,
-    max_position: int,
+    rotary_dim: int | None = None,
+    max_position: int = 4096,
     is_neox_style: bool = True,
     rope_parameters: dict[str, Any] | None = None,
     dtype: torch.dtype | None = None,
     partial_rotary_factor: float = 1.0,
     dual_chunk_attention_config: dict[str, Any] | None = None,
 ) -> RotaryEmbedding:
+    # gfx906-vllm: rotary_dim defaults to head_size when not provided
+    # (upstream API change for Gemma4 compatibility)
+    if rotary_dim is None:
+        rotary_dim = head_size
     if dtype is None:
         dtype = torch.get_default_dtype()
     if rope_parameters is not None:
@@ -285,6 +290,16 @@ def get_rope(
                 short_factor,
                 long_factor,
                 **extra_kwargs,
+            )
+        elif scaling_type == "proportional":
+            # Gemma4 uses proportional RoPE (per-head frequency scaling).
+            rotary_emb = Gemma4RotaryEmbedding(
+                head_size,
+                rotary_dim,
+                max_position,
+                base,
+                is_neox_style,
+                dtype,
             )
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")

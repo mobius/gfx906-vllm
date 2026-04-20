@@ -382,7 +382,9 @@ class MoeWNA16Method(FusedMoEMethodBase):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        assert activation == "silu", "Only SiLU activation is supported."
+        # gfx906-vllm: allow gelu for Gemma4 (and other non-SiLU MoE models)
+        assert activation in ("silu", "gelu", "gelu_pytorch_tanh"), \
+            f"Unsupported MoE activation: {activation}. Supported: silu, gelu."
         topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -399,6 +401,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             quant_config=self.moe_quant_config,
+            activation=activation,
         )
 
     @staticmethod

@@ -104,6 +104,7 @@ _TEXT_GENERATION_MODELS = {
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
     "Gemma3nForCausalLM": ("gemma3n", "Gemma3nForCausalLM"),
+    "Gemma4ForCausalLM": ("gemma4", "Gemma4ForCausalLM"),
     "Qwen3NextForCausalLM": ("qwen3_next", "Qwen3NextForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
@@ -291,6 +292,8 @@ _MULTIMODAL_MODELS = {
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
     ),
+    # gfx906-vllm: use text-only gemma4 to avoid multimodal dependency issues
+    "Gemma4ForConditionalGeneration": ("gemma4", "Gemma4ForCausalLM"),  # noqa: E501
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),  # noqa: E501
     "Glm4vMoeForConditionalGeneration": ("glm4_1v", "Glm4vMoeForConditionalGeneration"),  # noqa: E501

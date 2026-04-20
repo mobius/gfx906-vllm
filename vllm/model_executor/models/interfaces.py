@@ -1242,3 +1242,31 @@ def supports_xdrope(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsXDRoPE]] | TypeIs[SupportsXDRoPE]:
     return isinstance(model, SupportsXDRoPE)
+
+
+# gfx906-vllm: EagleModelMixin for Gemma4 compatibility
+# Gemma4 inherits from EagleModelMixin. Eagle speculation is not used on gfx906,
+# but the mixin methods must exist for the model to initialize correctly.
+import torch as _torch
+
+
+class EagleModelMixin:
+    """Mixin for Eagle speculative decoding. gfx906 provides no-op implementation."""
+
+    aux_hidden_state_layers: tuple[int, ...] = ()
+
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.aux_hidden_state_layers = layers
+
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[_torch.Tensor],
+        layer_idx: int,
+        hidden_states: _torch.Tensor,
+        residual: _torch.Tensor,
+    ) -> list[_torch.Tensor]:
+        if layer_idx in self.aux_hidden_state_layers:
+            value = (hidden_states + residual
+                     if residual is not None else hidden_states)
+            aux_hidden_states.append(value)
+        return aux_hidden_states

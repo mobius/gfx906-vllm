@@ -1,6 +1,7 @@
 #!/bin/bash
-# TurboQuant patch + vLLM 启动脚本
+# TurboQuant + Gemma4 patch + vLLM 启动脚本
 # 用法：在 Docker 容器内运行此脚本
+# 支持模型：Qwen2.5（AWQ）、Gemma4（AWQ）等
 
 set -e
 
@@ -8,7 +9,15 @@ VLLM_PATH=/opt/torchenv/lib/python3.12/site-packages/vllm
 SRC=/workspace/vllm
 WHEELS_DIR=/workspace/wheels
 
-# ── 步骤 0：安装 triton-gfx906 wheel（若有）────────────────────────────────
+# ── 步骤 0a：升级 transformers（Gemma4 需要 5.x）──────────────────────────────
+if python3 -c "import transformers; assert tuple(int(x) for x in transformers.__version__.split('.')[:2]) >= (5, 0)" 2>/dev/null; then
+  echo "[transformers] version OK: $(python3 -c 'import transformers; print(transformers.__version__)')"
+else
+  echo "[transformers] upgrading to >=5.0 for Gemma4 support..."
+  pip install 'transformers>=5.5.0' -q 2>&1 | grep -E 'Successfully|ERROR' | head -2
+fi
+
+# ── 步骤 0b：安装 triton-gfx906 wheel（若有）────────────────────────────────
 TQ_WHEEL=$(ls "${WHEELS_DIR}"/triton-*.whl 2>/dev/null | head -1)
 if [ -n "${TQ_WHEEL}" ]; then
   echo "[triton] Installing triton-gfx906 from ${TQ_WHEEL}..."
@@ -22,11 +31,13 @@ else
   echo "[triton] No wheel found in ${WHEELS_DIR}, using existing triton"
 fi
 
-echo "[patch] Applying TurboQuant patches to vLLM ${VLLM_PATH}..."
+echo "[patch] Applying gfx906 + TurboQuant + Gemma4 patches to vLLM ${VLLM_PATH}..."
 
 FILES=(
+  # ── gfx906 / TurboQuant core ─────────────────────────────────────────────
   config/cache.py
   attention/layer.py
+  model_executor/layers/quantization/moe_wna16.py
   attention/ops/triton_reshape_and_cache_flash.py
   model_executor/layers/quantization/turboquant/__init__.py
   model_executor/layers/quantization/turboquant/centroids.py
@@ -42,6 +53,30 @@ FILES=(
   v1/attention/ops/triton_turboquant_store.py
   v1/kv_cache_interface.py
   v1/core/single_type_kv_cache_manager.py
+  # ── Gemma4 support ───────────────────────────────────────────────────────
+  model_executor/models/gemma4.py
+  model_executor/models/gemma4_mm.py
+  model_executor/models/registry.py
+  model_executor/layers/rotary_embedding/__init__.py
+  model_executor/layers/rotary_embedding/gemma4_rope.py
+  reasoning/gemma4_reasoning_parser.py
+  reasoning/gemma4_utils.py
+  model_executor/layers/attention/__init__.py
+  model_executor/layers/fused_moe/__init__.py
+  model_executor/layers/fused_moe/activation.py
+  model_executor/layers/fused_moe/router/__init__.py
+  model_executor/layers/fused_moe/router/gate_linear.py
+  model_executor/layers/fused_moe/router/base_router.py
+  model_executor/layers/fused_moe/router/fused_moe_router.py
+  model_executor/layers/fused_moe/router/fused_topk_router.py
+  model_executor/layers/fused_moe/router/fused_topk_bias_router.py
+  model_executor/layers/fused_moe/router/grouped_topk_router.py
+  model_executor/layers/fused_moe/router/router_factory.py
+  model_executor/layers/fused_moe/router/custom_routing_router.py
+  model_executor/layers/fused_moe/router/routing_simulator_router.py
+  model_executor/layers/fused_moe/router/zero_expert_router.py
+  model_executor/custom_op.py
+  model_executor/models/interfaces.py
 )
 
 for f in "${FILES[@]}"; do

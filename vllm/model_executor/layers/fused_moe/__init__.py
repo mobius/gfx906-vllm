@@ -8,6 +8,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoeWeightScaleSupported,
@@ -44,6 +45,7 @@ __all__ = [
     "FusedMoE",
     "FusedMoEConfig",
     "FusedMoEMethodBase",
+    "GateLinear",
     "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",
     "FusedMoEPermuteExpertsUnpermute",
