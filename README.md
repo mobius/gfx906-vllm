@@ -22,6 +22,56 @@
 
 ## 最新更新
 
+### ✅ 2026年4月更新 — TurboQuant KV Cache 压缩
+
+**TurboQuant** 是 vLLM 的 KV cache 压缩功能，通过量化将 KV 缓存体积缩小至 1/4，从而大幅扩展同等显存下的上下文长度与并发能力。本次更新完成了其在 MI50（gfx906）上的完整移植。
+
+#### 功能说明
+
+- **压缩比**: 约 3.6×（标准 float16 KV → turboquant_4bit_nc）
+- **KV cache 容量示例**:
+  - Qwen2.5-1.5B-Instruct：901K → **3.25M tokens**
+  - Qwen2.5-7B-Instruct-AWQ：~400K → **1.32M tokens**
+- **推荐 preset**: `turboquant_4bit_nc`（4bit key + 4bit value，适合 gfx906）
+- **不可用 preset**: `turboquant_k8v4`（需要 FP8 硬件，gfx906 不支持）
+
+#### 快速启动
+
+需要先编译 [triton-gfx906](https://github.com/nlzy/triton-gfx906/tree/v3.5.0+gfx906) wheel 并放至 `/workspace/wheels/` 目录，然后使用提供的启动脚本：
+
+```bash
+# 7B AWQ 模型 + TurboQuant KV（推荐，精度更好）
+sudo podman run -d \
+  --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
+  -p 8000:8000 \
+  -v /path/to/gfx906-vllm:/workspace \
+  -v /path/to/triton-wheel:/workspace/wheels \
+  -v /path/to/models:/root/.cache/huggingface \
+  docker.io/nalanzeyu/vllm-gfx906:latest \
+  bash /workspace/scripts/start_turboquant.sh \
+    --model Qwen/Qwen2.5-7B-Instruct-AWQ \
+    --kv-cache-dtype turboquant_4bit_nc \
+    --dtype float16 \
+    --max-model-len 4096 \
+    --enforce-eager \
+    --host 0.0.0.0 --port 8000
+```
+
+#### 精度说明
+
+- **7B+ 模型**：推理质量良好，轻微量化噪声，可正常使用
+- **1.5B 小模型**：短生成（<10 tokens）可接受，长生成质量有退化——这是 4bit 量化对小模型精度损失的固有限制，非 gfx906 特有问题
+- triton-gfx906 kernel 经过完整精度验证（roundtrip MAE < 0.05，真实数据重放 MAE < 0.001）
+
+#### 本次修复的 bug
+
+- `platforms/rocm.py`：修复 `supported_dtypes` / `supported_quantization` 的 @property vs @classmethod 访问冲突，解决服务启动 `TypeError` 及 AWQ 量化模型加载失败
+- `v1/attention/ops/triton_turboquant_decode.py`：修正 `_fwd_kernel_stage2` 导入路径
+- `v1/kv_cache_interface.py`：新增 `TQFullAttentionSpec` 支持正确的 TurboQuant 页大小计算
+- 新增诊断工具脚本：`scripts/start_turboquant.sh`、`scripts/test_turboquant.py`、`scripts/compare_svc_offline.py` 等
+
+---
+
 ### ✅ 2026年3月更新
 
 - **修复 HIPBLAS 兼容性问题** - 解决了 ROCm/gfx906 上的 `HIPBLAS_STATUS_INTERNAL_ERROR` 错误
@@ -184,6 +234,7 @@ print(response.choices[0].message.content)
 - ✅ **GPTQ** - 推荐
 - ✅ **AWQ** - 推荐
 - ✅ **W4A16 INT** - 支持（通过 llm-compressor）
+- ✅ **TurboQuant KV Cache 压缩** - 支持 `turboquant_4bit_nc` preset（需 triton-gfx906 wheel）
 - ⚠️ **MoE 量化模型** - 速度显著较慢，不推荐
 - ⚠️ **非量化模型** - 略慢，但可用
 
