@@ -385,12 +385,30 @@ class MoeWNA16Method(FusedMoEMethodBase):
         # gfx906-vllm: allow gelu for Gemma4 (and other non-SiLU MoE models)
         assert activation in ("silu", "gelu", "gelu_pytorch_tanh"), \
             f"Unsupported MoE activation: {activation}. Supported: silu, gelu."
+
+        # Debug: print shapes on first call
+        import os as _os
+        if _os.environ.get('TQ_MOE_DEBUG', '0') == '1' and not getattr(self, '_moe_debug_printed', False):
+            self._moe_debug_printed = True
+            import logging as _log
+            moe_cfg = self.get_fused_moe_quant_config(layer)
+            qz = layer.w13_qzeros if hasattr(layer, 'w13_qzeros') and layer.w13_qzeros is not None else None
+            qz_info = f'shape={qz.shape} dtype={qz.dtype} numel={qz.numel()} nbytes={qz.nbytes}' if qz is not None else 'None'
+            _log.getLogger(__name__).warning(
+                '[MoeWNA16] w13_qweight=%s dtype=%s | w13_scales=%s dtype=%s | w13_qzeros: %s | w2_qweight=%s | w2_scales=%s | group_size=%d block_shape=%s',
+                layer.w13_qweight.shape, layer.w13_qweight.dtype,
+                layer.w13_scales.shape, layer.w13_scales.dtype,
+                qz_info,
+                layer.w2_qweight.shape, layer.w2_scales.shape, layer.group_size,
+                moe_cfg.block_shape if moe_cfg else 'None'
+            )
+
         topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
 
-        return fused_experts(
+        quant_out = fused_experts(
             x,
             layer.w13_qweight,
             layer.w2_qweight,
@@ -403,6 +421,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
             quant_config=self.moe_quant_config,
             activation=activation,
         )
+
+        return quant_out
 
     @staticmethod
     def get_weight_loader(layer, weight_loader):

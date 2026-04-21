@@ -90,6 +90,44 @@ find "${VLLM_PATH}" -name "*.pyc" -path "*turboquant*" -delete 2>/dev/null || tr
 find "${VLLM_PATH}" -name "*.pyc" -path "*cache*" -delete 2>/dev/null || true
 find "${VLLM_PATH}" -name "*.pyc" -path "*registry*" -delete 2>/dev/null || true
 
+# ── 可选：让 MoE expert 层走 fp16（绕过 MoeWNA16 量化路径）─────────────────
+# 设置 VLLM_GEMMA4_FP16_MOE=1 来启用
+if [ "${VLLM_GEMMA4_FP16_MOE:-0}" = "1" ]; then
+  echo "[patch] Applying fp16 MoE patch to awq.py (MoE experts will run in fp16)..."
+  python3 -c "
+import re
+path = '${VLLM_PATH}/model_executor/layers/quantization/awq.py'
+with open(path) as f:
+    content = f.read()
+old = '''        elif isinstance(layer, FusedMoE):
+            # Lazy import to avoid circular import.
+            from .moe_wna16 import MoeWNA16Config
+            config = {
+                \"quant_method\": \"awq\",
+                \"bits\": self.weight_bits,
+                \"group_size\": self.group_size,
+                \"zero_point\": self.zero_point,
+                \"lm_head\": False,
+                \"modules_to_not_convert\": self.modules_to_not_convert,
+            }
+            logger.warning_once(
+                \"[vllm-gfx906] You are using modified MoeWNA16 kernel, \"
+                \"this is differ from the offical vLLM.\")
+            return MoeWNA16Config.from_config(config).get_quant_method(
+                layer, prefix)'''
+new = '''        elif isinstance(layer, FusedMoE):
+            # gfx906-vllm fp16-moe mode: MoE expert layers run in fp16
+            return None'''
+if old in content:
+    content = content.replace(old, new)
+    with open(path, 'w') as f:
+        f.write(content)
+    print('[patch] awq.py: MoE experts set to fp16')
+else:
+    print('[patch] WARNING: awq.py fp16-moe pattern not found (already patched?)')
+" 2>&1
+fi
+
 echo "[patch] Done. Verifying imports..."
 python3 -c "
 from vllm.config.cache import CacheDType

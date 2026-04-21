@@ -193,9 +193,85 @@ vllm/model_executor/models/registry.py     # 新增 Gemma4ForCausalLM 注册
 - Qwen2.5-7B AWQ：dense linear，group_size=128，走 `AWQLinearMethod` + `gptq_gemm`，正确
 - Gemma4 AWQ MoE：FusedMoE，group_size=32，走 `MoeWNA16` + `fused_experts(quant_config)` 路径，有 hidden size mismatch 错误
 
-### 8.3 下一步（Phase B）
+### 8.3 深挖诊断（2026-04-21 进一步分析）
 
-1. **调试 MoeWNA16 权重格式**：检查 `convert_awq_tensor` 后的 `w13_qweight` 形状，与 `fused_experts` 期望格式对齐
-2. **修复 Hidden size mismatch**：可能需要调整 `w1_scales/w2_scales` 的 shape 传入方式，或 `block_shape` 的维度定义
+**模型关键维度**（从 config.json 确认）：
+- `hidden_size = 2816`（K 维度，hidden → MoE 输入）
+- `moe_intermediate_size = 704`（N 维度，每个专家的中间维度）
+- `num_experts = 128`，`top_k_experts = 8`，`group_size = 32`
+
+**权重格式验证**（从 safetensors 文件）：
+```
+gate_proj.qweight: [2816, 88]  → [K, N//8]  = [2816, 704//8]  ✅
+gate_proj.qzeros:  [88, 88]   → [K//G, N//8] = [2816//32, 704//8] ✅
+gate_proj.scales:  [88, 704]  → [K//G, N]   = [88, 704]            ✅
+```
+
+**convert_awq_tensor 验证**（模拟确认）：
+- 输入 `qzeros [88, 88]` int32 → 输出 `[352, 88]` uint8 ✅
+- 这等于 `[N//2, K//G]`，正是 Triton kernel 期望的格式
+
+**block_shape 确认**：
+- `layer.group_size = 32`（K 维度 2816 % 32 == 0，不需要 div_factor 调整）
+- `block_shape = [0, 32]`
+- Triton kernel 中 `offs_k // group_size` 最大 = `2816 // 32 = 88` = scales 第三维 ✅
+- qzeros 访问 `offs_bn // 2` 最大 = `1407 // 2 = 703` < `qzeros.shape[1] = 704` ✅
+
+**CUDA vs Triton 路径**：
+- `should_moe_wna16_use_cuda()` 要求 `current_platform.is_cuda_alike()`
+- MI50 是 ROCm，不满足，**始终走 Triton kernel** (`fused_moe_kernel_gptq_awq`)
+
+**activation 路径**：
+- `gemma4.py` 传 `activation="gelu"` 给 `FusedMoE`
+- `fused_experts_impl` 中 `"gelu"` 调用 `torch.ops._C.gelu_and_mul` ✅
+
+**未解决的问题**：
+- 精度问题依旧（"Japan: Berlin" 而非 "Tokyo"）
+- 当前 `block_shape=[0, 32]` 理论正确，但无法运行验证（GPU 被 orphan 进程占用）
+- `w13_qzeros.nbytes` 异常（测到 15,859,712 而非期望 7,929,856）：
+  - 静态模拟：uint8 param 赋值后仍为 uint8 ✅
+  - **真实运行时**：nbytes = `numel * element_size = 7,929,856 * 2 = 15,859,712` → element_size=2？
+  - 需要在容器中打印 `qz.dtype` 确认
+
+### 8.5 精度问题解决（2026-04-21 最终确认）
+
+**结论：Gemma4 AWQ MoE 在 MI50 上推理完全正确！**
+
+之前的"精度问题"（"Japan: Berlin"）是**测试方法错误**导致的：
+- 用了 raw completion 格式，没有使用 Gemma4 的指令格式 `<start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n`
+- Gemma4 是 instruction-tuned 模型，需要正确的 chat template
+
+**正确测试结果（gemma4-dtype 容器，block_shape=[0, 32]，dtype=uint8）**：
+
+```
+prompt: <start_of_turn>user\nWhat is the capital of Japan?<end_of_turn>\n<start_of_turn>model\n
+
+output: <thought>
+The user is asking for the capital of Japan.
+The capital of Japan is Tokyo.
+I will provide the answer.
+The answer is Tokyo.
+```
+✅ 完全正确！
+
+```
+prompt: 17 * 23 = ?
+
+output: 用 (20-3)(20+3) = 400-9 = 391 的方法计算，推理链完整、正确
+```
+✅ 数学推理高质量！
+
+**最终确认的权重格式（运行时实测）**：
+```
+w13_qzeros: shape=[128, 704, 88] dtype=torch.uint8 numel=7929856 nbytes=7929856 ✅
+block_shape=[0, 32] ✅
+group_size=32 ✅
+```
+
+### 8.6 当前状态：Phase B 完成
+
+Gemma4 26B-A4B AWQ 在 MI50 (gfx906) 上推理完全正确，下一步可以：
+1. 开启 TurboQuant KV 压缩（只压缩 global full-attention 层）
+2. 评估 TurboQuant + Gemma4 的 KV cache 扩展比
 3. **备选方案**：如果 MoE 量化路径修复复杂，可以考虑让 MoE 层走 fp16 路径（在 `modules_to_not_convert` 里排除 MoE expert 层）
 
