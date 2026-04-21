@@ -337,20 +337,41 @@ GPU KV cache size: 50,272 tokens
 > 由于 sliding 层本来主导内存，TQ 压缩带来的净增益较小。
 > 可通过 `--max-model-len` 更大值 + TQ 来获得更明显的 KV 扩展效果。
 
-### 9.5 架构层级
+### 9.6 KV 扩展效果深度评测（max_model_len=32768）
 
-```
-Gemma4 30层（max_model_len=4096）:
+**测试结果**：
 
-层 0-4, 6-10, 12-16, 18-22, 24-28  (25层 sliding_attention)
-  → TRITON_ATTN backend
-  → FullAttentionSpec(head_dim=256, sliding_window=1024, fp16)
-  → 内存：2 * block_size * num_kv_heads * head_dim * 2 bytes/block
+| 配置 | Available KV Mem | KV cache tokens | 并发 (32k) |
+|------|-----------------|----------------|-----------|
+| Gemma4 fp16（无 TQ） | 11.15 GiB | **48,720 tokens** | 9.19x |
+| Gemma4 + TurboQuant 4bit_nc | 9.83 GiB | **50,304 tokens** | 1.54x |
 
-层 5, 11, 17, 23, 29               (5层 full_attention)
-  → TURBOQUANT backend
-  → TQFullAttentionSpec(head_dim=512, slot_size=518, uint8)
-  → 内存：block_size * num_kv_heads * slot_size bytes/block（4x 压缩）
-```
+**反直觉发现**：有 TQ 反而 available KV memory 更少（-1.32 GiB），导致 KV tokens 仅微增。
+
+**根本原因**：
+
+当前 TQ 方案将 sliding 层从 `SlidingWindowSpec` 降级为 `FullAttentionSpec`（为了统一 page_size）：
+
+| 方案 | sliding 层（25个）KV 内存 | full 层（5个）KV 内存 | 合计 |
+|------|------------------------|---------------------|------|
+| 无 TQ（SlidingWindowSpec） | 0.30 GiB（每层只需 3071 tokens） | 0.31 GiB（fp16） | **0.61 GiB** |
+| 有 TQ（FullAttentionSpec fallback） | **3.12 GiB**（每层分配全部 32768 tokens） | 0.08 GiB（TQ 4bit） | **3.20 GiB** |
+
+TQ 对 full 层节省了 0.23 GiB，但 sliding 层 FullAttentionSpec 多耗费了 2.82 GiB，净损失 2.59 GiB。这解释了为何 available KV memory 有 TQ 时反而少 1.32 GiB（差额由模型初始化阶段的 overhead 造成）。
+
+**技术瓶颈**：
+
+vLLM v1 的 `unify_kv_cache_spec_page_size` 要求所有层的 page_size 可整除：
+- `SlidingWindowSpec(head_dim=256)` page_size = 131,072 bytes
+- `TQFullAttentionSpec(slot=518)` page_size = 16,576 bytes
+- GCD(131,072, 16,576) = 32，无法统一
+
+因此不得不将 sliding 层改为 FullAttentionSpec（page_size 131,072）才能通过。
+
+**后续优化方向**：
+
+- 修改 `kv_cache_utils.py`，支持 TQ 层独立于 sliding 层单独分组（参考 Mamba spec 的处理方式）
+- 或：调整 TQ 的 slot_size padding，使 `block_size * 1 * slot_size = 131,072`（slot_size = 4,096？），需修改 TurboQuantConfig
+- 目前功能性集成已验证，内存效率优化可作为 Phase D
 3. **备选方案**：如果 MoE 量化路径修复复杂，可以考虑让 MoE 层走 fp16 路径（在 `modules_to_not_convert` 里排除 MoE expert 层）
 
