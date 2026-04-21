@@ -22,25 +22,58 @@
 
 ## 最新更新
 
-### ✅ 2026年4月更新 — TurboQuant KV Cache 压缩
+### ✅ 2026年4月更新 — TurboQuant KV Cache 压缩 + Gemma4 支持
 
-**TurboQuant** 是 vLLM 的 KV cache 压缩功能，通过量化将 KV 缓存体积缩小至 1/4，从而大幅扩展同等显存下的上下文长度与并发能力。本次更新完成了其在 MI50（gfx906）上的完整移植。
+本次更新完成两项主要工作：
 
-#### 功能说明
+1. **TurboQuant KV Cache 压缩**在 MI50（gfx906）上的完整移植
+2. **Gemma4-26B-A4B**（MoE 混合专家）模型在 MI50 上的支持，并与 TurboQuant 集成
+
+---
+
+#### TurboQuant 功能说明
 
 - **压缩比**: 约 3.6×（标准 float16 KV → turboquant_4bit_nc）
-- **KV cache 容量示例**:
+- **KV cache 容量示例（MI50 32GB）**:
   - Qwen2.5-1.5B-Instruct：901K → **3.25M tokens**
   - Qwen2.5-7B-Instruct-AWQ：~400K → **1.32M tokens**
 - **推荐 preset**: `turboquant_4bit_nc`（4bit key + 4bit value，适合 gfx906）
 - **不可用 preset**: `turboquant_k8v4`（需要 FP8 硬件，gfx906 不支持）
 
-#### 快速启动
+#### Gemma4 支持（新增）
 
-需要先编译 [triton-gfx906](https://github.com/nlzy/triton-gfx906/tree/v3.5.0+gfx906) wheel 并放至 `/workspace/wheels/` 目录，然后使用提供的启动脚本：
+- **模型**: `gemma-4-26B-A4B-AWQ`（26B 参数，激活 4B，128 专家，AWQ int4 量化，~16 GB）
+- **架构**: 混合 MoE + 滑动窗口 attention（25 层 sliding_attention + 5 层 full_attention）
+- **推理质量**: 知识问答、数学推理均正确（Tokyo ✅，17×23=391 推理链 ✅）
+- **TurboQuant 集成**: 5 个 full_attention 层使用 TURBOQUANT backend（4bit KV 压缩），25 个 sliding_attention 层使用 TRITON_ATTN
+- **KV cache**: max_model_len=32768 下约 50,304 tokens
+
+#### Gemma4 快速启动
 
 ```bash
-# 7B AWQ 模型 + TurboQuant KV（推荐，精度更好）
+sudo podman run -d \
+  --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
+  -p 8001:8001 \
+  -v /path/to/gfx906-vllm:/workspace \
+  -v /path/to/triton-wheel:/workspace/wheels \
+  -v /path/to/gemma-4-26B-A4B-AWQ:/model \
+  docker.io/nalanzeyu/vllm-gfx906:latest \
+  bash /workspace/scripts/start_turboquant.sh \
+    --model /model \
+    --dtype float16 \
+    --kv-cache-dtype turboquant_4bit_nc \
+    --max-model-len 32768 \
+    --gpu-memory-utilization 0.95 \
+    --enforce-eager \
+    --host 0.0.0.0 --port 8001
+```
+
+> **注意**: Gemma4 是 instruction-tuned 模型，请使用 Gemma 的 chat template 格式：
+> `<start_of_turn>user\n问题<end_of_turn>\n<start_of_turn>model\n`
+
+#### Qwen2.5 + TurboQuant 快速启动
+
+```bash
 sudo podman run -d \
   --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
   -p 8000:8000 \
@@ -57,18 +90,24 @@ sudo podman run -d \
     --host 0.0.0.0 --port 8000
 ```
 
+需要先编译 [triton-gfx906](https://github.com/nlzy/triton-gfx906/tree/v3.5.0+gfx906) wheel 并放至 `/workspace/wheels/` 目录。
+
 #### 精度说明
 
-- **7B+ 模型**：推理质量良好，轻微量化噪声，可正常使用
-- **1.5B 小模型**：短生成（<10 tokens）可接受，长生成质量有退化——这是 4bit 量化对小模型精度损失的固有限制，非 gfx906 特有问题
+- **Gemma4-26B-A4B AWQ**：推理质量优秀，TurboQuant 集成后无明显精度损失
+- **Qwen2.5-7B AWQ**：推理质量良好，轻微量化噪声，可正常使用
+- **Qwen2.5-1.5B**：短生成（<10 tokens）可接受，长生成质量有退化——4bit 量化对小模型的固有限制
 - triton-gfx906 kernel 经过完整精度验证（roundtrip MAE < 0.05，真实数据重放 MAE < 0.001）
 
 #### 本次修复的 bug
 
-- `platforms/rocm.py`：修复 `supported_dtypes` / `supported_quantization` 的 @property vs @classmethod 访问冲突，解决服务启动 `TypeError` 及 AWQ 量化模型加载失败
-- `v1/attention/ops/triton_turboquant_decode.py`：修正 `_fwd_kernel_stage2` 导入路径
+- `platforms/rocm.py`：修复 `supported_dtypes` / `supported_quantization` 的 @property vs @classmethod 访问冲突
+- `attention/layer.py`：新增 sliding window + TurboQuant 混合 KV cache 支持（per-layer backend 选择）
+- `model_executor/layers/quantization/moe_wna16.py`：新增 GELU activation 支持（Gemma4 MoE 使用 `gelu_pytorch_tanh`）
+- `model_executor/models/interfaces.py`：新增 `EagleModelMixin` stub（Gemma4 依赖）
+- `model_executor/layers/rotary_embedding/__init__.py`：新增 Gemma4 proportional RoPE 支持
 - `v1/kv_cache_interface.py`：新增 `TQFullAttentionSpec` 支持正确的 TurboQuant 页大小计算
-- 新增诊断工具脚本：`scripts/start_turboquant.sh`、`scripts/test_turboquant.py`、`scripts/compare_svc_offline.py` 等
+- 新增诊断工具脚本：`scripts/start_turboquant.sh`、`scripts/test_turboquant.py` 等
 
 ---
 
@@ -100,6 +139,9 @@ sudo podman run -d \
 - ✅ Qwen/Qwen3.5-2B（非多模态）
 - ✅ Qwen/Qwen3.5-4B（非多模态）
 - ✅ Qwen/Qwen3.5-9B（非多模态）
+- ✅ Qwen2.5-7B-Instruct-AWQ（+ TurboQuant KV 压缩）
+- ✅ Qwen2.5-1.5B-Instruct（+ TurboQuant KV 压缩）
+- ✅ **Gemma4-26B-A4B AWQ**（MoE，+ TurboQuant，推理质量优秀）
 
 **已知无法运行：**
 - ❌ **Qwen/Qwen3.5-35B-A3B-GPTQ-Int4** - MoE + GPTQ Int4 量化组合存在兼容性问题，导致服务无法正常启动或推理失败
@@ -232,10 +274,11 @@ print(response.choices[0].message.content)
 
 基于原项目测试结果：
 - ✅ **GPTQ** - 推荐
-- ✅ **AWQ** - 推荐
+- ✅ **AWQ** - 推荐（包括 MoE 模型）
 - ✅ **W4A16 INT** - 支持（通过 llm-compressor）
 - ✅ **TurboQuant KV Cache 压缩** - 支持 `turboquant_4bit_nc` preset（需 triton-gfx906 wheel）
-- ⚠️ **MoE 量化模型** - 速度显著较慢，不推荐
+- ✅ **MoE AWQ**（Gemma4 26B-A4B）- 支持，推理正确
+- ⚠️ **MoE GPTQ Int4**（Qwen3.5-35B-A3B）- 已知兼容性问题，不推荐
 - ⚠️ **非量化模型** - 略慢，但可用
 
 详细信息请参阅 [Issue #29](https://github.com/nlzy/vllm-gfx906/issues/29)。
