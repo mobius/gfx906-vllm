@@ -431,6 +431,9 @@ _SPECULATIVE_DECODING_MODELS = {
     "MiMoMTPModel": ("mimo_mtp", "MiMoMTP"),
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
+    # gfx906-vllm: Qwen2/Qwen2.5 EAGLE draft model support
+    "EagleQwen2ForCausalLM": ("qwen2_eagle", "EagleQwen2ForCausalLM"),
+    "EagleQwen25ForCausalLM": ("qwen2_eagle", "EagleQwen2ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),

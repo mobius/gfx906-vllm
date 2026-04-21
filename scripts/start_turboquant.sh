@@ -80,6 +80,9 @@ FILES=(
   # ── Phase C/D: Gemma4 sliding+TQ hybrid KV cache ─────────────────────────
   attention/layer.py
   v1/core/kv_cache_utils.py
+  # ── EAGLE speculative decoding: Qwen2/Qwen2.5 draft model support ─────────
+  model_executor/models/qwen2_eagle.py
+  model_executor/models/registry.py
 )
 
 for f in "${FILES[@]}"; do
