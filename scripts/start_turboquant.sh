@@ -77,6 +77,9 @@ FILES=(
   model_executor/layers/fused_moe/router/zero_expert_router.py
   model_executor/custom_op.py
   model_executor/models/interfaces.py
+  # ── Phase C/D: Gemma4 sliding+TQ hybrid KV cache ─────────────────────────
+  attention/layer.py
+  v1/core/kv_cache_utils.py
 )
 
 for f in "${FILES[@]}"; do
