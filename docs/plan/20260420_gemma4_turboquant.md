@@ -161,3 +161,41 @@ vllm/model_executor/models/registry.py     # 新增 Gemma4ForCausalLM 注册
 - 上游 vLLM Gemma4 支持: https://github.com/vllm-project/vllm (2026-04-02 合入)
 - TurboQuant Phase 2 文档: `docs/impl/20260420_phase2_turboquant_final.md`
 - Qwen2.5 TQ 精度评估: `docs/impl/20260420_phase2_debug_journal.md`
+
+---
+
+## 8. 当前状态与诊断发现（2026-04-21 更新）
+
+### 8.1 已完成的移植工作
+
+**Gemma4 服务在 MI50 上成功启动**（见 commit `16bcfc9c0`）：
+- 模型加载（Gemma4-26B-A4B AWQ，16 GB）✅
+- TRITON_ATTN attention backend ✅
+- MoE routing 工作 ✅
+- `Application startup complete` ✅
+- KV cache: 48,704 tokens（fp16，auto）✅
+
+### 8.2 精度问题诊断
+
+**表现**：推理输出质量低（选错关键词，如 "Japan:" → "Berlin" 而非 "Tokyo"）
+
+**诊断过程**：
+1. `gelu_and_mul` torch op 在 gfx906 上验证正确（MAE=0.000069）✅
+2. Dense fused_moe GELU 路径在 gfx906 正确（std 合理，无 NaN）✅
+3. Dense AWQ linear（Qwen2.5 路径）推理正确 ✅
+4. `gptq_gemm` 对 qweight `[K//8, N]` 格式输出正确的 `[B, N]` ✅
+
+**根因**：Gemma4 AWQ MoE 的量化路径（`MoeWNA16`）在 gfx906 上有精度问题。
+
+具体为：`fused_experts` 接收 `quant_config=int4_w4a16_moe_quant_config` 时触发 `AssertionError: Hidden size mismatch`，说明量化权重格式（`w13_qweight [E, 2N, K//8]`）与 fused_moe Triton kernel 期望的格式不匹配。
+
+**关键差异**：
+- Qwen2.5-7B AWQ：dense linear，group_size=128，走 `AWQLinearMethod` + `gptq_gemm`，正确
+- Gemma4 AWQ MoE：FusedMoE，group_size=32，走 `MoeWNA16` + `fused_experts(quant_config)` 路径，有 hidden size mismatch 错误
+
+### 8.3 下一步（Phase B）
+
+1. **调试 MoeWNA16 权重格式**：检查 `convert_awq_tensor` 后的 `w13_qweight` 形状，与 `fused_experts` 期望格式对齐
+2. **修复 Hidden size mismatch**：可能需要调整 `w1_scales/w2_scales` 的 shape 传入方式，或 `block_shape` 的维度定义
+3. **备选方案**：如果 MoE 量化路径修复复杂，可以考虑让 MoE 层走 fp16 路径（在 `modules_to_not_convert` 里排除 MoE expert 层）
+
