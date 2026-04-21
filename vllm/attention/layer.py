@@ -210,6 +210,20 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             block_size = 16
             calculate_kv_scales = False
+
+        # gfx906-vllm: sliding window layers cannot use TurboQuant compressed
+        # KV layout — fall back to standard fp16 attention for these layers.
+        # Full attention layers keep the user-specified kv_cache_dtype (TQ).
+        # _tq_fallback_sliding marks sliding layers that were downgraded from TQ
+        # so get_kv_cache_spec can return FullAttentionSpec (not SlidingWindowSpec)
+        # allowing the hybrid KV cache to unify page sizes.
+        self._tq_fallback_sliding = False
+        if (sliding_window is not None
+                and isinstance(kv_cache_dtype, str)
+                and kv_cache_dtype.startswith("turboquant_")):
+            kv_cache_dtype = "auto"
+            self._tq_fallback_sliding = True
+
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
@@ -470,7 +484,19 @@ class Attention(nn.Module, AttentionLayerBase):
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
         # Should not be called for enc-dec or encoder-only attention.
-        assert self.attn_type == AttentionType.DECODER
+        # attn_type=None is treated as DECODER (Gemma4 sliding window layers use None).
+        assert self.attn_type in (AttentionType.DECODER, None)
+        # gfx906-vllm: sliding layers that were TQ-fallback return FullAttentionSpec
+        # (with sliding_window set) instead of SlidingWindowSpec, to unify page sizes
+        # with TQFullAttentionSpec layers in the hybrid KV cache manager.
+        if self._tq_fallback_sliding:
+            return FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                dtype=self.kv_cache_torch_dtype,
+                sliding_window=self.sliding_window,
+            )
         if self.sliding_window is not None:
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"

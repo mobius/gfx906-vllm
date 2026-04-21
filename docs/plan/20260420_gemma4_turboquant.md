@@ -268,10 +268,89 @@ block_shape=[0, 32] ✅
 group_size=32 ✅
 ```
 
-### 8.6 当前状态：Phase B 完成
+## 9. Phase C 完成报告（2026-04-21）
 
-Gemma4 26B-A4B AWQ 在 MI50 (gfx906) 上推理完全正确，下一步可以：
-1. 开启 TurboQuant KV 压缩（只压缩 global full-attention 层）
-2. 评估 TurboQuant + Gemma4 的 KV cache 扩展比
+### 9.1 实现方案
+
+**修改文件**：`vllm/attention/layer.py`（仅此一处，25 行代码）
+
+**两处关键修改**：
+
+1. **`__init__` 中 sliding window 层降级**：
+   ```python
+   self._tq_fallback_sliding = False
+   if (sliding_window is not None
+           and isinstance(kv_cache_dtype, str)
+           and kv_cache_dtype.startswith("turboquant_")):
+       kv_cache_dtype = "auto"         # 降级到标准 fp16
+       self._tq_fallback_sliding = True  # 标记此层
+   ```
+
+2. **`get_kv_cache_spec` 返回 `FullAttentionSpec`（非 `SlidingWindowSpec`）**：
+   ```python
+   if self._tq_fallback_sliding:
+       return FullAttentionSpec(
+           ..., sliding_window=self.sliding_window
+       )
+   ```
+   关键：`TQFullAttentionSpec` 是 `FullAttentionSpec` 子类，
+   `UniformTypeKVCacheSpecs.is_uniform_type()` 对 FullAttentionSpec 路径，
+   两种 spec 都能通过检查，走 `_get_kv_cache_groups_uniform_type` 路径，
+   无需 `unify_kv_cache_spec_page_size`（避免 page size 不整除错误）。
+
+3. **`assert` 放宽**：允许 `attn_type=None`（Gemma4 sliding 层的默认值）
+
+### 9.2 启动验证
+
+**启动命令**：
+```bash
+--model /model --dtype float16 --kv-cache-dtype turboquant_4bit_nc \
+--max-model-len 4096 --gpu-memory-utilization 0.95 --enforce-eager
+```
+
+**日志验证（关键输出）**：
+```
+Using TRITON_ATTN attention backend   ← 25 个 sliding 层
+Using TURBOQUANT attention backend    ← 5 个 full attention 层
+[TurboQuant] slot_size=518 page_size=16576  ← 5 次（每个 full 层）
+GPU KV cache size: 50,272 tokens
+```
+
+### 9.3 推理验证
+
+| 测试 | 结果 |
+|------|------|
+| "What is the capital of Japan?" | **Tokyo** ✅ |
+| "What is 17 * 23?" (差平方推导) | **391，推理链完整** ✅ |
+| 模型加载（16 GB AWQ）| ✅ |
+| TurboQuant KV 压缩（full 层）| ✅ slot_size=518 |
+
+### 9.4 KV cache 对比
+
+| 配置 | KV cache tokens |
+|------|----------------|
+| Gemma4 fp16（无 TQ） | ~48,704 tokens |
+| Gemma4 + TurboQuant 4bit_nc | **50,272 tokens** |
+
+> 说明：Gemma4 sliding 层（25/30）使用 FullAttentionSpec 分配所有 token 的 KV，
+> 内存消耗较大；full 层（5/30）使用 TurboQuant 4bit 压缩，节省内存。
+> 由于 sliding 层本来主导内存，TQ 压缩带来的净增益较小。
+> 可通过 `--max-model-len` 更大值 + TQ 来获得更明显的 KV 扩展效果。
+
+### 9.5 架构层级
+
+```
+Gemma4 30层（max_model_len=4096）:
+
+层 0-4, 6-10, 12-16, 18-22, 24-28  (25层 sliding_attention)
+  → TRITON_ATTN backend
+  → FullAttentionSpec(head_dim=256, sliding_window=1024, fp16)
+  → 内存：2 * block_size * num_kv_heads * head_dim * 2 bytes/block
+
+层 5, 11, 17, 23, 29               (5层 full_attention)
+  → TURBOQUANT backend
+  → TQFullAttentionSpec(head_dim=512, slot_size=518, uint8)
+  → 内存：block_size * num_kv_heads * slot_size bytes/block（4x 压缩）
+```
 3. **备选方案**：如果 MoE 量化路径修复复杂，可以考虑让 MoE 层走 fp16 路径（在 `modules_to_not_convert` 里排除 MoE expert 层）
 
